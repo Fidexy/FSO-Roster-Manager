@@ -1,0 +1,39 @@
+name: Build Windows Portable App
+
+on:
+  workflow_dispatch: # Enables the manual "Run workflow" button in GitHub UI
+  push:
+    branches:
+      - main
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Portable Windows Executable
+        run: pnpm dist:portable
+
+      - name: Upload Executable Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FSO-Roster-Manager-Portable-Windows
+          path: dist/*.exe
+          retention-days: 30
