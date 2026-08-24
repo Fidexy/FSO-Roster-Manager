@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Roster Manager"
+description = "A client-side roster management app for aviation training and inspection scheduling. Stage 1: a dynamic intake form that adapts to event type (Simulator, Inspection, OOO) and submits entries to a staging queue held in client state."
+version = "1.0.0"
+id = "artifacts/roster-manager"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 24215
+
+[services.development]
+run = "pnpm --filter roster-manager run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "roster-manager", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/roster-manager/dist"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "24215"
+BASE_PATH = "/"
