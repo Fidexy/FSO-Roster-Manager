@@ -2,12 +2,17 @@ name: Build & Release Windows App
 
 on:
   workflow_dispatch:
+    inputs:
+      release_version:
+        description: 'Release Tag (e.g., v1.0.0). Leave empty for build-only artifact.'
+        required: false
+        default: ''
   push:
     tags:
-      - 'v*' # Triggers whenever you push a tag like v1.0.0, v1.0.1
+      - 'v*'
 
 permissions:
-  contents: write # Grants permission to create GitHub Releases and upload assets
+  contents: write
 
 jobs:
   build-and-release:
@@ -34,9 +39,18 @@ jobs:
       - name: Build Portable Windows Executable
         run: pnpm dist:portable
 
-      - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FSO-Roster-Manager-Portable
+          path: dist/*.exe
+          retention-days: 14
+
+      - name: Publish to GitHub Releases
+        if: ${{ github.event.inputs.release_version != '' || startsWith(github.ref, 'refs/tags/') }}
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.inputs.release_version || github.ref_name }}
+          name: ${{ github.event.inputs.release_version || github.ref_name }}
           files: dist/*.exe
           generate_release_notes: true
