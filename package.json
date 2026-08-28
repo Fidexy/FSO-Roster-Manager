@@ -1,6 +1,6 @@
 {
   "name": "roster-manager",
-  "version": "0.3.3",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "main": "main.cjs",
