@@ -286,6 +286,18 @@ export default function ManagementSummary() {
   const customFromISO = parseDDMMYY(customFrom);
   const customToISO = parseDDMMYY(customTo);
 
+  // Keep configured duties first, then include custom/historical duty types
+  // stored on events so the filter can target entries not present in Settings.
+  const otherDutiesActivityOptions = useMemo(() => {
+    const options = [...dutySubTypes];
+    for (const event of calendarEvents) {
+      if (event.eventType !== 'Other Duties') continue;
+      const activity = event.subType.trim();
+      if (activity && !options.includes(activity)) options.push(activity);
+    }
+    return options;
+  }, [calendarEvents, dutySubTypes]);
+
   // Keep the filter valid as Settings changes the configured activity list.
   // An empty effective value means all activities, including historical event
   // types that are no longer configured.
@@ -304,7 +316,7 @@ export default function ManagementSummary() {
     }
   }, [selectedSurveillanceActivity, surveillanceActivities]);
 
-  const effectiveOtherDutiesActivity = dutySubTypes.includes(
+  const effectiveOtherDutiesActivity = otherDutiesActivityOptions.includes(
     selectedOtherDutiesActivity,
   )
     ? selectedOtherDutiesActivity
@@ -313,11 +325,11 @@ export default function ManagementSummary() {
   useEffect(() => {
     if (
       selectedOtherDutiesActivity &&
-      !dutySubTypes.includes(selectedOtherDutiesActivity)
+      !otherDutiesActivityOptions.includes(selectedOtherDutiesActivity)
     ) {
       setSelectedOtherDutiesActivity('');
     }
-  }, [selectedOtherDutiesActivity, dutySubTypes]);
+  }, [selectedOtherDutiesActivity, otherDutiesActivityOptions]);
 
   // Filtered events for the selected period
   const filteredEvents = useMemo(() => {
@@ -1038,7 +1050,7 @@ export default function ManagementSummary() {
                     className="h-8 min-w-0 flex-1 rounded border border-border bg-card px-2.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-colors sm:flex-none"
                   >
                     <option value="">All Duties</option>
-                    {dutySubTypes.map(activity => (
+                    {otherDutiesActivityOptions.map(activity => (
                       <option key={activity} value={activity}>{activity}</option>
                     ))}
                   </select>
