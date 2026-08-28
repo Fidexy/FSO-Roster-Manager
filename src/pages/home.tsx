@@ -15,12 +15,13 @@ import {
   DEFAULT_QUALIFICATIONS,
   DEFAULT_OPERATORS,
   DEFAULT_OPERATOR_COLORS,
+  DEFAULT_OTHER_DUTIES_COLORS,
   DEFAULT_SIMULATOR_ACTIVITIES,
   DEFAULT_SIMULATOR_MAP,
   DEFAULT_SURVEILLANCE_ACTIVITIES,
   DEFAULT_SURVEILLANCE_QUALIFICATIONS,
-  firstNameOf,
   makeShortName,
+  sortInspectorsByName,
 } from "@/store/rosterStore";
 import { validateEvent, EventInput } from "@/store/validateEvent";
 import { motion, AnimatePresence } from "framer-motion";
@@ -62,7 +63,9 @@ import {
   resetExportVersion,
   resetAllExportVersions,
   readVersionSnapshot,
+  readVersionBaseline,
   writeVersionSnapshot,
+  writeVersionBaseline,
   readVersionChangelog,
   writeVersionChangelog,
   appendVersionChangelogHistory,
@@ -71,6 +74,29 @@ import {
 import { computeChangelog, hasTrackedChanges } from "@/utils/exportDiff";
 
 type ActiveView = "calendar" | "settings" | "summary";
+
+function localDateKey(date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function isValidDateKey(value: string | null): value is string {
+  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  const parsed = new Date(year, month - 1, day);
+  return (
+    parsed.getFullYear() === year &&
+    parsed.getMonth() === month - 1 &&
+    parsed.getDate() === day
+  );
+}
+
+function getInitialSelectedDate(): string {
+  const saved = localStorage.getItem("roster-last-date");
+  return isValidDateKey(saved) ? saved : localDateKey();
+}
 
 
 const FieldInput = React.forwardRef<
@@ -138,26 +164,28 @@ export default function Home() {
     leaveTypes,
     dutySubTypes,
     operatorColors,
+    otherDutiesColors,
   } = state;
 
-  const simCodes = Object.keys(simulatorMap);
+  const simCodes = Object.keys(simulatorMap).sort((a, b) =>
+    a.localeCompare(b, undefined, { sensitivity: "base" }),
+  );
 
   const [activeView, setActiveView] = useState<ActiveView>("calendar");
 
   // ── Form state ────────────────────────────────────────────────────────────
-  const [eventType, setEventType] = useState<EventType>("Simulator");
-  const [date, setDate] = useState(
-    () =>
-      localStorage.getItem("roster-last-date") ??
-      new Date().toISOString().split("T")[0],
-  );
+  const [eventType, setEventType] = useState<EventType>("Operator Request");
+  const [date, setDate] = useState(getInitialSelectedDate);
   const [startTime, setStartTime] = useState("");
   const [endTime, setEndTime] = useState("");
   const [selectedInspectors, setSelectedInspectors] = useState<string[]>([]);
 
   // Simulator fields
   const [operator, setOperator] = useState("");
-  const [simulatorCode, setSimulatorCode] = useState("");
+  const [simulatorCodes, setSimulatorCodes] = useState<string[]>([]);
+  const [aircraftType, setAircraftType] = useState("");
+  const [aircraftTypeManuallyEdited, setAircraftTypeManuallyEdited] =
+    useState(false);
   const [activity, setActivity] = useState<string>("");
   const [useCustomActivity, setUseCustomActivity] = useState(false);
   const [candidateName, setCandidateName] = useState("");
@@ -185,6 +213,7 @@ export default function Home() {
   const [otherDutiesColorManuallySet, setOtherDutiesColorManuallySet] =
     useState(false);
   const [otherDutiesRemarks, setOtherDutiesRemarks] = useState("");
+  const [otherDutiesAppendRemark, setOtherDutiesAppendRemark] = useState(false);
 
   const startTimeRef = useRef<HTMLInputElement>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
@@ -234,19 +263,22 @@ export default function Home() {
 
   /** Export settings only (everything except events). */
   const handleSettingsExport = async () => {
-    const { operatorColors } = state;
+    const { operatorColors, otherDutiesColors } = state;
     const suggestedName = `settings-${new Date().toISOString().split("T")[0]}.json`;
     const blob = jsonBlob({
       exportDate: new Date().toISOString(),
       version: 1,
       operators,
       operatorColors,
+      otherDutiesColors,
       simulatorActivities,
       simulatorMap,
       inspectors,
       qualifications,
       surveillanceActivities: state.surveillanceActivities,
       surveillanceQualifications: state.surveillanceQualifications,
+      leaveTypes,
+      dutySubTypes,
     });
     const result = await saveFileWithPicker(blob, suggestedName, [
       { description: "JSON file", accept: { "application/json": [".json"] } },
@@ -285,6 +317,20 @@ export default function Home() {
         } else {
           importState(sanitized);
           resetAllExportVersions();
+          const importedByMonth = new Map<
+            string,
+            NonNullable<typeof sanitized.calendarEvents>
+          >();
+          for (const event of sanitized.calendarEvents ?? []) {
+            const monthStr = event.date.slice(0, 7);
+            const monthEvents: NonNullable<typeof sanitized.calendarEvents> =
+              importedByMonth.get(monthStr) ?? [];
+            monthEvents.push(event);
+            importedByMonth.set(monthStr, monthEvents);
+          }
+          for (const [monthStr, monthEvents] of importedByMonth) {
+            writeVersionBaseline(monthStr, monthEvents);
+          }
           setExportVersion(0);
           showNotice(
             "success",
@@ -342,14 +388,10 @@ export default function Home() {
 
   // Currently viewed calendar month (lifted from CalendarGrid so exports can use it)
   const [calYear, setCalYear] = useState(() => {
-    const saved = localStorage.getItem("roster-last-date");
-    return saved ? parseInt(saved.split("-")[0], 10) : new Date().getFullYear();
+    return Number(getInitialSelectedDate().split("-")[0]);
   });
   const [calMonth, setCalMonth] = useState(() => {
-    const saved = localStorage.getItem("roster-last-date");
-    return saved
-      ? parseInt(saved.split("-")[1], 10)
-      : new Date().getMonth() + 1; // 1-based
+    return Number(getInitialSelectedDate().split("-")[1]); // 1-based
   });
 
   // ── Export dropdowns ──────────────────────────────────────────────────────
@@ -430,17 +472,18 @@ export default function Home() {
     const monthEvents = calendarEvents.filter((e) =>
       e.date.startsWith(ms + "-"),
     );
-    // 1. Compute changelog against the PREVIOUS snapshot BEFORE overwriting it
-    const previousSnapshot = readVersionSnapshot(ms);
-    // Treat the first committed roster as additions from an empty baseline.
-    // This gives v1 a meaningful changelog and preserves it in the history.
+    // 1. Compute changelog against the PREVIOUS snapshot or imported baseline
+    // BEFORE overwriting the committed snapshot.
+    const previousSnapshot = readVersionSnapshot(ms) ?? readVersionBaseline(ms);
+    // A brand-new roster has no baseline, so its first commit compares against
+    // an empty roster. An imported roster compares against its imported state.
     const changelog = computeChangelog(previousSnapshot ?? [], monthEvents);
     writeVersionChangelog(ms, changelog);
     // 2. Now overwrite the snapshot with the current state
     writeVersionSnapshot(ms, monthEvents);
     // 3. Finally bump the version counter
     const newVersion = incrementExportVersion(ms);
-    appendVersionChangelogHistory(ms, newVersion, changelog);
+    appendVersionChangelogHistory(ms, newVersion, changelog, monthEvents);
     setExportVersion(newVersion);
     setPendingNewVersion(false);
   };
@@ -497,7 +540,7 @@ export default function Home() {
     if (exportFormat === "docx-operator") {
       const op = exportOperator;
       const simEvents = events.filter(
-        (e) => e.eventType === "Simulator" && e.operator === op,
+        (e) => e.eventType === "Operator Request" && e.operator === op,
       );
       const blob = await exportWordOperatorPlan(
         calYear,
@@ -526,20 +569,20 @@ export default function Home() {
       const activeOps = [
         ...new Set(
           events
-            .filter((e) => e.eventType === "Simulator")
+            .filter((e) => e.eventType === "Operator Request")
             .map((e) => e.operator)
             .filter(Boolean),
         ),
       ].sort() as string[];
       if (activeOps.length === 0) {
-        showNotice("error", "No Simulator events found for this month.");
+        showNotice("error", "No Operator Request events found for this month.");
         return;
       }
       const { zipSync } = await import("fflate");
       const files: Record<string, Uint8Array> = {};
       for (const op of activeOps) {
         const simEvents = events.filter(
-          (e) => e.eventType === "Simulator" && e.operator === op,
+          (e) => e.eventType === "Operator Request" && e.operator === op,
         );
         const blob = await exportWordOperatorPlan(
           calYear,
@@ -578,6 +621,7 @@ export default function Home() {
         allEvents,
         state.operatorColors,
         effectiveVersion,
+        state.otherDutiesColors,
       );
       const result = await saveFileWithPicker(blob, suggestedName, [
         {
@@ -611,13 +655,16 @@ export default function Home() {
         calMonth,
         allEvents,
         state.operatorColors,
+        state.otherDutiesColors,
         state.operators,
-        state.inspectors.map((i) => firstNameOf(i.name)),
+        state.inspectors.map((i) => i.name),
         getHKHolidayMap(calYear),
         effectiveVersion,
         changelog,
         exportId,
         !isDraft ? readVersionChangelogHistory(monthStr) : [],
+        !isDraft ? unfilteredMonthEvents : undefined,
+        !isDraft && readVersionBaseline(monthStr) !== null,
       );
       const suggestedName = `roster-${monthStr}_${today}${vSuffix}.html`;
       const blob = new Blob([htmlStr], { type: "text/html;charset=utf-8" });
@@ -655,11 +702,11 @@ export default function Home() {
         "Event Type": e.eventType,
         Inspectors: e.inspectors.join(", "),
       };
-      if (e.eventType === "Simulator") {
+      if (e.eventType === "Operator Request") {
         return {
           ...base,
           Operator: e.operator,
-          "Sim Code": e.simulatorCode,
+          "Sim Code": e.simulatorCodes?.join(", ") ?? e.simulatorCode,
           Aircraft: e.aircraftType,
           Activity: e.activity,
           Candidate: e.candidateName,
@@ -747,6 +794,7 @@ export default function Home() {
         qualifications: DEFAULT_QUALIFICATIONS,
         operators: [...DEFAULT_OPERATORS],
         operatorColors: { ...DEFAULT_OPERATOR_COLORS },
+        otherDutiesColors: { ...DEFAULT_OTHER_DUTIES_COLORS },
         simulatorActivities: [...DEFAULT_SIMULATOR_ACTIVITIES],
         surveillanceActivities: [...DEFAULT_SURVEILLANCE_ACTIVITIES],
         surveillanceQualifications: { ...DEFAULT_SURVEILLANCE_QUALIFICATIONS },
@@ -815,7 +863,7 @@ export default function Home() {
   const [showEditOverlay, setShowEditOverlay] = useState(false);
 
   useEffect(() => {
-    if (editingEventId) setShowEditOverlay(true);
+    setShowEditOverlay(Boolean(editingEventId));
   }, [editingEventId]);
 
   // ── Validation error for edit mode ────────────────────────────────────────
@@ -846,15 +894,20 @@ export default function Home() {
     }
   }, [simulatorActivities, useCustomActivity]);
 
-  // Clear simulator code if it was removed from the map (but leave blank alone)
+  // Remove simulator codes that were deleted from Settings (but leave blank alone).
   useEffect(() => {
-    if (simulatorCode && !(simulatorCode in simulatorMap)) {
-      setSimulatorCode("");
-    }
-  }, [simulatorMap, simulatorCode]);
+    setSimulatorCodes((current) =>
+      current.filter((code) => code in simulatorMap),
+    );
+  }, [simulatorMap]);
 
-  // Aircraft type is derived from the simulator map — display only
-  const aircraftType = simulatorMap[simulatorCode] ?? "";
+  // Use the first simulator code as the initial suggestion, but preserve a
+  // manually entered aircraft type when the selected codes change.
+  useEffect(() => {
+    if (aircraftTypeManuallyEdited) return;
+    setAircraftType(simulatorMap[simulatorCodes[0]] ?? "");
+  }, [aircraftTypeManuallyEdited, simulatorCodes, simulatorMap]);
+
   const defaultOtherDutiesColor =
     operatorColors[
       otherDutiesOperators.find((op) => op.toLowerCase() !== "n/a") ?? ""
@@ -873,13 +926,17 @@ export default function Home() {
   // ── Reset form to blank defaults ──────────────────────────────────────────
   const resetForm = useCallback(() => {
     setValidationError(null);
-    setEventType("Simulator");
-    setDate(new Date().toISOString().split("T")[0]);
+    setEditingEventId(null);
+    setEditingStagingId(null);
+    setShowEditOverlay(false);
+    setEventType("Operator Request");
     setStartTime("");
     setEndTime("");
     setSelectedInspectors([]);
     setOperator("");
-    setSimulatorCode("");
+    setSimulatorCodes([]);
+    setAircraftType("");
+    setAircraftTypeManuallyEdited(false);
     setActivity("");
     setUseCustomActivity(false);
     setCandidateName("");
@@ -897,6 +954,7 @@ export default function Home() {
     setOtherDutiesCustomColor("#9ca3af");
     setOtherDutiesColorManuallySet(false);
     setOtherDutiesRemarks("");
+    setOtherDutiesAppendRemark(false);
   }, [operators, simulatorActivities]);
 
   // ── Populate form when entering edit mode ─────────────────────────────────
@@ -910,10 +968,25 @@ export default function Home() {
     setStartTime(event.startTime);
     setEndTime(event.endTime);
     setSelectedInspectors([...event.inspectors]);
+    setLeaveShift(
+      event.eventType === "Leave"
+        ? event.leaveShift ?? null
+        : event.eventType === "Other Duties"
+          ? event.otherDutiesShift ?? null
+          : null,
+    );
 
-    if (event.eventType === "Simulator") {
+    if (event.eventType === "Operator Request") {
       setOperator(event.operator);
-      setSimulatorCode(event.simulatorCode);
+      setSimulatorCodes(
+        event.simulatorCodes?.length
+          ? [...event.simulatorCodes]
+          : event.simulatorCode
+            ? [event.simulatorCode]
+            : [],
+      );
+      setAircraftType(event.aircraftType ?? "");
+      setAircraftTypeManuallyEdited(true);
       setActivity(event.activity);
       setCandidateName(event.candidateName);
       setUseCustomActivity(
@@ -935,6 +1008,7 @@ export default function Home() {
       setOtherDutiesIncludeCustom(!!customOp);
       setOtherDutiesCustomOp(customOp ?? "");
       setOtherDutiesRemarks(event.remarks ?? "");
+      setOtherDutiesAppendRemark(event.appendRemarkToCalendarPill === true);
       const isPresetSub = dutySubTypes.includes(event.subType);
       setAexmorSubType(isPresetSub ? event.subType : "Custom");
       setCustomSubType(isPresetSub ? "" : event.subType);
@@ -964,10 +1038,25 @@ export default function Home() {
     setStartTime(event.startTime);
     setEndTime(event.endTime);
     setSelectedInspectors([...event.inspectors]);
+    setLeaveShift(
+      event.eventType === "Leave"
+        ? event.leaveShift ?? null
+        : event.eventType === "Other Duties"
+          ? event.otherDutiesShift ?? null
+          : null,
+    );
 
-    if (event.eventType === "Simulator") {
+    if (event.eventType === "Operator Request") {
       setOperator(event.operator);
-      setSimulatorCode(event.simulatorCode);
+      setSimulatorCodes(
+        event.simulatorCodes?.length
+          ? [...event.simulatorCodes]
+          : event.simulatorCode
+            ? [event.simulatorCode]
+            : [],
+      );
+      setAircraftType(event.aircraftType ?? "");
+      setAircraftTypeManuallyEdited(true);
       setActivity(event.activity);
       setCandidateName(event.candidateName);
       setUseCustomActivity(
@@ -989,6 +1078,7 @@ export default function Home() {
       setOtherDutiesIncludeCustom(!!customOp);
       setOtherDutiesCustomOp(customOp ?? "");
       setOtherDutiesRemarks(event.remarks ?? "");
+      setOtherDutiesAppendRemark(event.appendRemarkToCalendarPill === true);
       const isPresetSub = dutySubTypes.includes(event.subType);
       setAexmorSubType(isPresetSub ? event.subType : "Custom");
       setCustomSubType(isPresetSub ? "" : event.subType);
@@ -1017,21 +1107,22 @@ export default function Home() {
 
   // ── Derived: split inspectors into qualified / others for the activity ────
   // Custom activities bypass qualification checks — all inspectors are selectable.
+  const orderedInspectors = sortInspectorsByName(inspectors);
   const qualifiedPositions = useCustomActivity ? [] : (qualifications[activity] ?? []);
   const qualifiedInspectors =
-    eventType === "Simulator" && !useCustomActivity
-      ? inspectors.filter((i) => qualifiedPositions.includes(i.position))
-      : inspectors;
+    eventType === "Operator Request" && !useCustomActivity
+      ? orderedInspectors.filter((i) => qualifiedPositions.includes(i.position))
+      : orderedInspectors;
   const otherInspectors =
-    eventType === "Simulator" && !useCustomActivity
-      ? inspectors.filter((i) => !qualifiedPositions.includes(i.position))
+    eventType === "Operator Request" && !useCustomActivity
+      ? orderedInspectors.filter((i) => !qualifiedPositions.includes(i.position))
       : [];
   const shortName = makeShortName(inspectors);
 
-  // Simulator events need at least one *qualified* inspector selected.
+  // Operator Request events need at least one *qualified* inspector selected.
   // Custom activities skip this requirement.
   const hasQualifiedSelected =
-    eventType !== "Simulator" ||
+    eventType !== "Operator Request" ||
     useCustomActivity ||
     selectedInspectors.some((name) => {
       const inspector = inspectors.find((i) => i.name === name);
@@ -1069,12 +1160,13 @@ export default function Home() {
     if (editingEventId) {
       let updatedData: EventInput | null = null;
 
-      if (eventType === "Simulator") {
+      if (eventType === "Operator Request") {
         updatedData = {
           ...base,
-          eventType: "Simulator",
+          eventType: "Operator Request",
           operator,
-          simulatorCode,
+           simulatorCodes,
+           simulatorCode: simulatorCodes[0] ?? "",
           aircraftType,
           activity,
           candidateName,
@@ -1103,10 +1195,14 @@ export default function Home() {
           eventType: "Other Duties",
           operators: resolvedOps,
           subType: resolvedSubType,
+          ...(leaveShift ? { otherDutiesShift: leaveShift } : {}),
           ...(aexmorSubType === "Custom"
             ? { customColor: otherDutiesCustomColor }
             : {}),
           ...(remarksVal ? { remarks: remarksVal } : {}),
+          ...(otherDutiesAppendRemark
+            ? { appendRemarkToCalendarPill: true }
+            : {}),
         };
       } else {
         const resolvedLeaveType =
@@ -1116,6 +1212,7 @@ export default function Home() {
           ...base,
           eventType: "Leave",
           leaveType: resolvedLeaveType,
+          ...(leaveShift ? { leaveShift } : {}),
         };
       }
 
@@ -1145,12 +1242,13 @@ export default function Home() {
     if (editingStagingId) {
       let updatedData: EventInput | null = null;
 
-      if (eventType === "Simulator") {
+      if (eventType === "Operator Request") {
         updatedData = {
           ...base,
-          eventType: "Simulator",
+          eventType: "Operator Request",
           operator,
-          simulatorCode,
+           simulatorCodes,
+           simulatorCode: simulatorCodes[0] ?? "",
           aircraftType,
           activity,
           candidateName,
@@ -1179,10 +1277,14 @@ export default function Home() {
           eventType: "Other Duties",
           operators: resolvedOps,
           subType: resolvedSubType,
+          ...(leaveShift ? { otherDutiesShift: leaveShift } : {}),
           ...(aexmorSubType === "Custom"
             ? { customColor: otherDutiesCustomColor }
             : {}),
           ...(remarksVal ? { remarks: remarksVal } : {}),
+          ...(otherDutiesAppendRemark
+            ? { appendRemarkToCalendarPill: true }
+            : {}),
         };
       } else {
         const resolvedLeaveType =
@@ -1192,6 +1294,7 @@ export default function Home() {
           ...base,
           eventType: "Leave",
           leaveType: resolvedLeaveType,
+          ...(leaveShift ? { leaveShift } : {}),
         };
       }
 
@@ -1205,16 +1308,17 @@ export default function Home() {
     }
 
     // ── Create mode ──────────────────────────────────────────────────────────
-    if (eventType === "Simulator") {
+    if (eventType === "Operator Request") {
       addEventToQueue({
         ...base,
-        eventType: "Simulator",
+        eventType: "Operator Request",
         operator,
-        simulatorCode,
+         simulatorCodes,
+         simulatorCode: simulatorCodes[0] ?? "",
         aircraftType,
         activity,
         candidateName,
-      } as import("@/store/rosterStore").SimulatorEvent);
+      } as import("@/store/rosterStore").OperatorRequestEvent);
     } else if (eventType === "Surveillance") {
       if (surveillanceTypes.length === 0) return;
       const range = expandDailyEventRange({
@@ -1264,10 +1368,14 @@ export default function Home() {
           eventType: "Other Duties",
           operators: resolvedOps,
           subType: resolvedSubType,
+          ...(leaveShift ? { otherDutiesShift: leaveShift } : {}),
           ...(aexmorSubType === "Custom"
             ? { customColor: otherDutiesCustomColor }
             : {}),
           ...(remarksVal ? { remarks: remarksVal } : {}),
+          ...(otherDutiesAppendRemark
+            ? { appendRemarkToCalendarPill: true }
+            : {}),
         } as import("@/store/rosterStore").OtherDutiesEvent);
       });
     } else {
@@ -1290,6 +1398,7 @@ export default function Home() {
           ...slice,
           eventType: "Leave",
           leaveType: resolvedLeaveType,
+          ...(leaveShift ? { leaveShift } : {}),
         } as import("@/store/rosterStore").LeaveEvent);
       });
       resetForm();
@@ -1318,7 +1427,16 @@ export default function Home() {
     setSelectedInspectors([]);
     setOooEndDate("");
     setValidationError(null);
-    if (type === "Simulator") { setActivity(""); setUseCustomActivity(false); }
+    setLeaveShift(null);
+    if (type === "Operator Request") {
+      setActivity("");
+      setUseCustomActivity(false);
+      setAircraftTypeManuallyEdited(false);
+      setAircraftType(simulatorMap[simulatorCodes[0]] ?? "");
+    } else {
+      setAircraftType("");
+      setAircraftTypeManuallyEdited(false);
+    }
     setLeaveShift(null);
   };
 
@@ -1778,25 +1896,22 @@ export default function Home() {
         {/* Intake form — always visible */}
         <aside className="relative w-1/4 min-w-72 shrink-0 h-full bg-card border-r border-border flex flex-col overflow-hidden">
           {/* Edit-guard overlay — appears when a calendar event is clicked; user must press Edit to unlock */}
-          <AnimatePresence>
-            {editingEventId && showEditOverlay && (
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.15 }}
-                className="absolute inset-0 z-20 bg-background/60 backdrop-blur-[1px] flex items-center justify-center"
+          {editingEventId && showEditOverlay && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: 0.15 }}
+              className="absolute inset-0 z-20 bg-background/60 backdrop-blur-[1px] flex items-center justify-center"
+            >
+              <button
+                type="button"
+                onClick={() => setShowEditOverlay(false)}
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-card border border-border shadow-lg text-sm font-medium text-foreground hover:bg-secondary transition-colors"
               >
-                <button
-                  type="button"
-                  onClick={() => setShowEditOverlay(false)}
-                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-card border border-border shadow-lg text-sm font-medium text-foreground hover:bg-secondary transition-colors"
-                >
-                  <Pencil className="w-4 h-4" /> Edit
-                </button>
-              </motion.div>
-            )}
-          </AnimatePresence>
+                <Pencil className="w-4 h-4" /> Edit
+              </button>
+            </motion.div>
+          )}
 
           {/* Form header — switches between New Entry, Calendar Edit, and Staging Edit mode */}
           <div
@@ -1849,15 +1964,16 @@ export default function Home() {
 
           <form
             onSubmit={handleSubmit}
-            className="flex flex-col flex-1 p-5 gap-5 overflow-y-auto"
+            className="flex min-h-0 flex-1 flex-col overflow-y-auto"
           >
+            <div className="flex min-h-full flex-col gap-5 p-5">
             {/* Event Type */}
-            <div>
+            <div className="shrink-0">
               <FieldLabel>Event Type</FieldLabel>
               <div className="flex rounded border border-border overflow-hidden">
                 {(
                   [
-                    "Simulator",
+                    "Operator Request",
                     "Surveillance",
                     "Other Duties",
                     "Leave",
@@ -1880,7 +1996,7 @@ export default function Home() {
             </div>
 
             {/* Date & Times */}
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 gap-3 shrink-0">
               <div className="col-span-2">
                 <FieldLabel>Date</FieldLabel>
                 <FieldInput
@@ -1894,7 +2010,7 @@ export default function Home() {
                     {date.split("-").reverse().join("-")}
                   </p>
                 )}
-                {eventType !== "Simulator" &&
+                {eventType !== "Operator Request" &&
                   !editingEventId &&
                   !editingStagingId && (
                   <div className="mt-3">
@@ -2010,12 +2126,12 @@ export default function Home() {
               )}
             </div>
 
-            <div className="h-px bg-border" />
+            <div className="h-px shrink-0 bg-border" />
 
             {/* Conditional Fields */}
             <div className="min-h-[140px] shrink-0">
               <AnimatePresence mode="wait">
-                {eventType === "Simulator" && (
+                {eventType === "Operator Request" && (
                   <motion.div
                     key="sim"
                     initial={{ opacity: 0, y: 4 }}
@@ -2037,26 +2153,47 @@ export default function Home() {
                       </FieldSelect>
                     </div>
                     <div>
-                      <FieldLabel>Simulator Code <span className="font-normal text-muted-foreground">(optional)</span></FieldLabel>
-                      <FieldSelect
-                        value={simulatorCode}
-                        onChange={(e) => setSimulatorCode(e.target.value)}
-                      >
-                        <option value="">— select —</option>
-                        {simCodes.map((code) => (
-                          <option key={code} value={code}>
-                            {code}
-                          </option>
-                        ))}
-                      </FieldSelect>
+                      <FieldLabel>
+                        Simulator Code{" "}
+                        <span className="font-normal text-muted-foreground">
+                           (optional; pick one or more)
+                        </span>
+                      </FieldLabel>
+                       <div className="rounded border border-border bg-card overflow-hidden">
+                         <div className="max-h-40 overflow-y-auto">
+                           {simCodes.map((code) => (
+                             <label
+                               key={code}
+                               className="flex items-center gap-2 px-2.5 py-1.5 hover:bg-muted/50 cursor-pointer text-xs"
+                             >
+                               <input
+                                 type="checkbox"
+                                 checked={simulatorCodes.includes(code)}
+                                 onChange={() =>
+                                   setSimulatorCodes((prev) =>
+                                     prev.includes(code)
+                                       ? prev.filter((selected) => selected !== code)
+                                       : [...prev, code],
+                                   )
+                                 }
+                                 className="w-3.5 h-3.5 accent-primary shrink-0"
+                               />
+                               <span className="text-foreground">{code}</span>
+                             </label>
+                           ))}
+                         </div>
+                       </div>
                     </div>
                     <div>
                       <FieldLabel>Aircraft Type</FieldLabel>
-                      <div className="w-full h-8 rounded border border-border bg-muted/50 px-2.5 flex items-center text-sm text-foreground">
-                        {aircraftType || (
-                          <span className="text-muted-foreground">—</span>
-                        )}
-                      </div>
+                      <FieldInput
+                        value={aircraftType}
+                        onChange={(e) => {
+                          setAircraftType(e.target.value);
+                          setAircraftTypeManuallyEdited(true);
+                        }}
+                        placeholder="Aircraft type"
+                      />
                     </div>
                     <div>
                       <FieldLabel>Activity</FieldLabel>
@@ -2314,6 +2451,17 @@ export default function Home() {
                         rows={2}
                         className="w-full rounded border border-border bg-card px-2.5 py-1.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-colors resize-none"
                       />
+                      <label className="mt-2 flex items-center gap-2 text-sm text-foreground">
+                        <input
+                          type="checkbox"
+                          checked={otherDutiesAppendRemark}
+                          onChange={(e) =>
+                            setOtherDutiesAppendRemark(e.target.checked)
+                          }
+                          className="h-4 w-4 rounded border-border accent-primary"
+                        />
+                        <span>Append remark to calendar pill</span>
+                      </label>
                     </div>
                   </motion.div>
                 )}
@@ -2354,10 +2502,10 @@ export default function Home() {
               </AnimatePresence>
             </div>
 
-            <div className="h-px bg-border" />
+            <div className="h-px shrink-0 bg-border" />
 
             {/* Inspectors */}
-            <div>
+            <div className="shrink-0">
               <div className="flex items-center justify-between mb-2">
                 <FieldLabel>
                   Inspectors{" "}
@@ -2368,7 +2516,7 @@ export default function Home() {
                 <span className="text-xs text-muted-foreground">
                   {selectedInspectors.length > 0
                     ? `${selectedInspectors.length} selected`
-                    : eventType === "Simulator" &&
+                    : eventType === "Operator Request" &&
                         qualifiedInspectors.length === 0
                       ? "None qualify"
                       : ""}
@@ -2379,7 +2527,7 @@ export default function Home() {
                 <p className="text-xs text-muted-foreground py-2">
                   No inspectors in roster. Add them in Settings.
                 </p>
-              ) : eventType === "Simulator" && !useCustomActivity ? (
+              ) : eventType === "Operator Request" && !useCustomActivity ? (
                 <div className="flex flex-col gap-3">
                   {/* Qualified section */}
                   <div>
@@ -2486,7 +2634,7 @@ export default function Home() {
 
             {/* Validation error (edit mode) */}
             {validationError && (
-              <div className="flex items-start gap-2 rounded border border-amber-300 bg-amber-50 px-3 py-2">
+              <div className="flex shrink-0 items-start gap-2 rounded border border-amber-300 bg-amber-50 px-3 py-2">
                 <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0 mt-px" />
                 <p className="text-xs text-amber-700 leading-snug">
                   {validationError}
@@ -2495,11 +2643,11 @@ export default function Home() {
             )}
 
             {/* Submit / Cancel */}
-            <div className="mt-auto pt-2 flex flex-col gap-2">
+            <div className="mt-auto shrink-0 pt-2 flex flex-col gap-2">
               <button
                 type="submit"
                 disabled={
-                  (eventType === "Simulator" && (!startTime || !endTime)) ||
+                  (eventType === "Operator Request" && (!startTime || !endTime)) ||
                   (eventType !== "Other Duties" && selectedInspectors.length === 0) ||
                   !hasQualifiedSelected
                 }
@@ -2569,6 +2717,7 @@ export default function Home() {
                 </>
               )}
             </div>
+            </div>
           </form>
         </aside>
 
@@ -2592,6 +2741,7 @@ export default function Home() {
                 <CalendarGrid
                   year={calYear}
                   month={calMonth}
+                  selectedDate={date}
                   onMonthChange={(y, m) => {
                     setCalYear(y);
                     setCalMonth(m);
@@ -2680,7 +2830,7 @@ export default function Home() {
                   <div>
                     <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Contents</p>
                     <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-xs text-primary">
-                      {['The basics','Simulator events','Surveillance events','Other Duties events','Leave events','Staging queue','Calendar','Editing & deleting','Exporting','Importing & backup','Management Summary','Settings'].map(s => (
+                      {['The basics','Operator Request events','Surveillance events','Other Duties events','Leave events','Staging queue','Calendar','Editing & deleting','Exporting','Importing & backup','Management Summary','Settings'].map(s => (
                         <span key={s} className="text-muted-foreground">› {s}</span>
                       ))}
                     </div>
@@ -2714,22 +2864,22 @@ export default function Home() {
                     </ol>
                     <p className="mt-2 text-muted-foreground">The staging queue lets you catch mistakes before events become part of the official record.</p>
                     <div className="mt-2 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 rounded p-2.5 text-xs text-blue-800 dark:text-blue-300">
-                      <strong>Common fields on every event:</strong> Date (required), Start / End Time (optional except Simulator), Inspectors (required — click name buttons to select). Blank times default to all-day (00:00–23:59).
+                      <strong>Common fields on every event:</strong> Date (required), Start / End Time (optional except Operator Request), Inspectors (required — click name buttons to select). Blank times default to all-day (00:00–23:59).
                     </div>
                     <h3>Timed multi-day entries</h3>
-                    <p>New <strong>Leave</strong>, <strong>Surveillance</strong>, and <strong>Other Duties</strong> entries can include an optional, inclusive End Date. The app creates one independent entry per day: the first day runs from the entered start time to 23:59, middle days run 00:00–23:59, and the final day runs 00:00 to the entered end time. Leave both optional times blank for all-day entries. Simulator entries and edits of individual calendar or staged entries are always single-day.</p>
+                    <p>New <strong>Leave</strong>, <strong>Surveillance</strong>, and <strong>Other Duties</strong> entries can include an optional, inclusive End Date. The app creates one independent entry per day: the first day runs from the entered start time to 23:59, middle days run 00:00–23:59, and the final day runs 00:00 to the entered end time. Leave both optional times blank for all-day entries. Operator Request entries and edits of individual calendar or staged entries are always single-day.</p>
                   </div>
 
                   <hr className="border-border" />
 
                   <div>
-                    <h2>✈️ Simulator events</h2>
+                    <h2>✈️ Operator Request events</h2>
                     <table>
                       <thead><tr><th>Field</th><th>Notes</th></tr></thead>
                       <tbody>
                         <tr><td><strong>Operator</strong></td><td>Company organising the session.</td></tr>
-                        <tr><td><strong>Simulator Code</strong></td><td>Optional device code (e.g. CPA01). Auto-fills Aircraft Type.</td></tr>
-                        <tr><td><strong>Aircraft Type</strong></td><td>Read-only; derived from the Simulator Code.</td></tr>
+                        <tr><td><strong>Simulator Code</strong></td><td>Optional device code (e.g. CPA01). Initializes Aircraft Type from the map.</td></tr>
+                        <tr><td><strong>Aircraft Type</strong></td><td>Starts from the selected Simulator Code mapping, but can be edited for this event.</td></tr>
                         <tr><td><strong>Activity</strong></td><td>Choose from the list or select <em>Custom…</em> for a free-form name.</td></tr>
                         <tr><td><strong>Candidate Name</strong></td><td>Optional. The trainee's name.</td></tr>
                         <tr><td><strong>Inspectors</strong></td><td>At least one <strong>qualified</strong> inspector required for list activities.</td></tr>
@@ -2851,7 +3001,7 @@ export default function Home() {
 
                   <div>
                     <h2>📊 Management Summary</h2>
-                    <p>Toggle between <em>Month</em> and <em>Last 12 months</em>. The <strong>Overview</strong> tab shows Duty vs Leave breakdown, workload per inspector, and Simulator sessions per operator. The <strong>OJT Tracker</strong> tab lists training progress for inspectors not yet fully qualified — select an inspector to see their qualifying session history for each activity.</p>
+                    <p>Toggle between <em>Month</em> and <em>Last 12 months</em>. The <strong>Overview</strong> tab shows Duty vs Leave breakdown, workload per inspector, and Operator Request sessions per operator. The <strong>OJT Tracker</strong> tab lists training progress for inspectors not yet fully qualified — select an inspector to see their qualifying session history for each activity.</p>
                   </div>
 
                   <hr className="border-border" />

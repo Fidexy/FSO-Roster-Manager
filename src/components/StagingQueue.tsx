@@ -5,14 +5,14 @@ import {
   firstNameOf,
 } from "@/store/rosterStore";
 
-/** Sort inspector names so qualified inspectors appear first (Simulator events only). */
+/** Sort inspector names so qualified inspectors appear first (Operator Request events only). */
 function sortedInspectors(
   names: string[],
   event: RosterEvent,
   inspectors: { name: string; position: string }[],
   qualifications: Record<string, string[]>,
 ): string[] {
-  if (event.eventType !== "Simulator") return names;
+  if (event.eventType !== "Operator Request") return names;
   const qualifiedPositions = new Set(qualifications[event.activity] ?? []);
   const positionOf = new Map(inspectors.map((i) => [i.name, i.position]));
   const isQualified = (name: string) =>
@@ -33,7 +33,7 @@ import { motion, AnimatePresence } from "framer-motion";
 
 function EventBadge({ type }: { type: EventType }) {
   const styles: Record<EventType, string> = {
-    Simulator: "bg-blue-50 text-blue-700 border-blue-200",
+    "Operator Request": "bg-blue-50 text-blue-700 border-blue-200",
     Surveillance: "bg-amber-50 text-amber-700 border-amber-200",
     "Other Duties": "bg-purple-50 text-purple-700 border-purple-200",
     Leave: "bg-gray-50 text-gray-600 border-gray-200",
@@ -48,13 +48,13 @@ function EventBadge({ type }: { type: EventType }) {
 }
 
 function EventSummary({ event }: { event: RosterEvent }) {
-  if (event.eventType === "Simulator") {
+  if (event.eventType === "Operator Request") {
     return (
       <p className="text-xs text-foreground truncate">
         <span className="font-medium">{event.candidateName}</span>
         <span className="text-muted-foreground">
           {" "}
-          · {event.operator}/{event.simulatorCode}/{event.aircraftType} ·{" "}
+          · {event.operator}/{event.simulatorCodes?.join(", ") ?? event.simulatorCode}/{event.aircraftType} ·{" "}
           {event.activity}
         </span>
       </p>

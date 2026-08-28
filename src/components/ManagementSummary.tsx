@@ -1,7 +1,12 @@
 import { useState, useMemo, useEffect } from 'react';
-import { useRosterStore, SimulatorEvent, RosterEvent } from '@/store/rosterStore';
+import {
+  useRosterStore,
+  OperatorRequestEvent,
+  RosterEvent,
+  SurveillanceEvent,
+} from '@/store/rosterStore';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
-import { BarChart2, ClipboardList } from 'lucide-react';
+import { ArrowDown, ArrowUp, BarChart2, ClipboardList } from 'lucide-react';
 
 // ─── OJT types ───────────────────────────────────────────────────────────────
 
@@ -21,6 +26,17 @@ type SurveillanceRecord = {
   types: string[];
   details: string;
   inspectors: string[];
+};
+
+type OtherDutiesRecord = {
+  id: string;
+  date: string;
+  startTime: string;
+  endTime: string;
+  activity: string;
+  operators: string;
+  inspectors: string;
+  remarks: string;
 };
 
 // ─── Date helpers ─────────────────────────────────────────────────────────────
@@ -105,18 +121,24 @@ function fmtHours(mins: number): string {
   return `${m}m`;
 }
 
+function fmtBarHours(mins: number): string {
+  if (mins === 0) return '';
+  if (mins % 60 === 0) return `${mins / 60}h`;
+  return `${(mins / 60).toFixed(1)}h`;
+}
+
 // ─── Event-type colour + label maps ──────────────────────────────────────────
 
-const DUTY_TYPES = ['Simulator', 'Surveillance', 'Other Duties'] as const;
+const DUTY_TYPES = ['Operator Request', 'Surveillance', 'Other Duties'] as const;
 type DutyType = typeof DUTY_TYPES[number];
 
 const TYPE_BG: Record<DutyType, string> = {
-  Simulator:   'bg-blue-500',
+  'Operator Request': 'bg-blue-500',
   Surveillance: 'bg-violet-500',
   'Other Duties': 'bg-orange-400',
 };
 const TYPE_LABEL: Record<DutyType, string> = {
-  Simulator:   'Simulator',
+  'Operator Request':   'Operator Request',
   Surveillance: 'Surveillance',
   'Other Duties': 'Other Duties',
 };
@@ -129,7 +151,9 @@ export default function ManagementSummary() {
     calendarEvents,
     inspectors,
     qualifications,
+    surveillanceActivities,
     surveillanceQualifications,
+    dutySubTypes,
   } = state;
 
   // ─── OJT extraction ────────────────────────────────────────────────────────
@@ -141,7 +165,7 @@ export default function ManagementSummary() {
 
     const ledger: Record<string, OJTRecord[]> = {};
 
-    // Shared derivation for Simulator and Surveillance events: inspectors whose
+    // Shared derivation for Operator Request and Surveillance events: inspectors whose
     // position is permitted for the activity act as supervisors; others are
     // trainees. Sessions with no qualified inspector are not OJT sessions.
     const addOjtRecords = (
@@ -181,8 +205,8 @@ export default function ManagementSummary() {
     };
 
     for (const ev of calendarEvents) {
-      if (ev.eventType === 'Simulator') {
-        const sim = ev as SimulatorEvent;
+      if (ev.eventType === 'Operator Request') {
+        const sim = ev as OperatorRequestEvent;
         addOjtRecords(sim, sim.activity, qualifications[sim.activity] ?? []);
       } else if (ev.eventType === 'Surveillance') {
         for (const type of ev.surveillanceTypes) {
@@ -252,8 +276,48 @@ export default function ManagementSummary() {
     () => toDDMMYY(endOfCurrentMonthISO()),
   );
   const [metric, setMetric] = useState<'count' | 'hours'>('count');
+  const [surveillanceSort, setSurveillanceSort] = useState<'date' | 'type'>('date');
+  const [selectedSurveillanceActivity, setSelectedSurveillanceActivity] = useState<string>('');
+  const [selectedOtherDutiesActivity, setSelectedOtherDutiesActivity] = useState<string>('');
+  const [otherDutiesSort, setOtherDutiesSort] = useState<{
+    key: 'inspector' | 'operator' | 'activity' | 'date';
+    direction: 'asc' | 'desc';
+  }>({ key: 'date', direction: 'desc' });
   const customFromISO = parseDDMMYY(customFrom);
   const customToISO = parseDDMMYY(customTo);
+
+  // Keep the filter valid as Settings changes the configured activity list.
+  // An empty effective value means all activities, including historical event
+  // types that are no longer configured.
+  const effectiveSurveillanceActivity = surveillanceActivities.includes(
+    selectedSurveillanceActivity,
+  )
+    ? selectedSurveillanceActivity
+    : '';
+
+  useEffect(() => {
+    if (
+      selectedSurveillanceActivity &&
+      !surveillanceActivities.includes(selectedSurveillanceActivity)
+    ) {
+      setSelectedSurveillanceActivity('');
+    }
+  }, [selectedSurveillanceActivity, surveillanceActivities]);
+
+  const effectiveOtherDutiesActivity = dutySubTypes.includes(
+    selectedOtherDutiesActivity,
+  )
+    ? selectedOtherDutiesActivity
+    : '';
+
+  useEffect(() => {
+    if (
+      selectedOtherDutiesActivity &&
+      !dutySubTypes.includes(selectedOtherDutiesActivity)
+    ) {
+      setSelectedOtherDutiesActivity('');
+    }
+  }, [selectedOtherDutiesActivity, dutySubTypes]);
 
   // Filtered events for the selected period
   const filteredEvents = useMemo(() => {
@@ -269,16 +333,28 @@ export default function ManagementSummary() {
     return calendarEvents.filter(ev => ev.date >= from && ev.date <= to);
   }, [calendarEvents, period, selectedMonth, customFromISO, customToISO]);
 
+  // Empty Other Duties operator fields are not summary events. Explicit values
+  // such as "N/A" still represent a deliberate operator selection and count.
+  const summaryEvents = useMemo(
+    () =>
+      filteredEvents.filter(
+        ev =>
+          ev.eventType !== 'Other Duties' ||
+          ev.operators.some(operator => operator.trim().length > 0),
+      ),
+    [filteredEvents],
+  );
+
   // Duty vs Leave split
   const dutyEvents = useMemo(
-    () => filteredEvents.filter(ev => ev.eventType !== 'Leave'),
-    [filteredEvents],
+    () => summaryEvents.filter(ev => ev.eventType !== 'Leave'),
+    [summaryEvents],
   );
   const leaveEvents = useMemo(
-    () => filteredEvents.filter(ev => ev.eventType === 'Leave'),
-    [filteredEvents],
+    () => summaryEvents.filter(ev => ev.eventType === 'Leave'),
+    [summaryEvents],
   );
-  const total = filteredEvents.length;
+  const total = summaryEvents.length;
   const dutyPct  = total > 0 ? Math.round((dutyEvents.length  / total) * 100) : 0;
   const leavePct = total > 0 ? 100 - dutyPct : 0;
 
@@ -332,12 +408,12 @@ export default function ManagementSummary() {
     ? (workloadList[0]?.[1].mins ?? 1) || 1
     : (workloadList[0]?.[1].count ?? 1) || 1;
 
-  // Operator request count: Simulator events grouped by operator
+  // Operator request count: Operator Request events grouped by operator
   const operatorRequestList = useMemo(() => {
     const map = new Map<string, number>();
     for (const ev of filteredEvents) {
-      if (ev.eventType !== 'Simulator') continue;
-      const op = (ev as SimulatorEvent).operator;
+      if (ev.eventType !== 'Operator Request') continue;
+      const op = (ev as OperatorRequestEvent).operator;
       map.set(op, (map.get(op) ?? 0) + 1);
     }
     return [...map.entries()].sort((a, b) => b[1] - a[1]);
@@ -345,11 +421,23 @@ export default function ManagementSummary() {
 
   const maxOpCount = operatorRequestList[0]?.[1] ?? 1;
 
+  // Apply the activity filter before grouping records by operator. Events can
+  // contain multiple types, so a match on any assigned type is sufficient.
+  const filteredSurveillanceEvents = useMemo<SurveillanceEvent[]>(
+    () =>
+      filteredEvents.filter(
+        (ev): ev is SurveillanceEvent =>
+          ev.eventType === 'Surveillance' &&
+          (effectiveSurveillanceActivity === '' ||
+            ev.surveillanceTypes.includes(effectiveSurveillanceActivity)),
+      ),
+    [filteredEvents, effectiveSurveillanceActivity],
+  );
+
   // Surveillance events grouped by operator for the visual activity ledger.
   const surveillanceByOperator = useMemo(() => {
     const groups = new Map<string, SurveillanceRecord[]>();
-    for (const ev of filteredEvents) {
-      if (ev.eventType !== 'Surveillance') continue;
+    for (const ev of filteredSurveillanceEvents) {
       const operator = ev.operator || 'N/A';
       const records = groups.get(operator) ?? [];
       records.push({
@@ -367,13 +455,35 @@ export default function ManagementSummary() {
       .map(([operator, records]) => [
         operator,
         records.sort(
-          (a, b) =>
-            b.date.localeCompare(a.date) ||
-            b.startTime.localeCompare(a.startTime),
+          (a, b) => {
+            if (surveillanceSort === 'type') {
+              const typeKey = (record: SurveillanceRecord) =>
+                [...record.types]
+                  .sort((left, right) =>
+                    left.localeCompare(right, undefined, { sensitivity: 'base' }),
+                  )
+                  .join(', ');
+              return (
+                typeKey(a).localeCompare(
+                  typeKey(b),
+                  undefined,
+                  { sensitivity: 'base' },
+                ) ||
+                a.date.localeCompare(b.date) ||
+                a.startTime.localeCompare(b.startTime) ||
+                a.id.localeCompare(b.id)
+              );
+            }
+            return (
+              b.date.localeCompare(a.date) ||
+              b.startTime.localeCompare(a.startTime) ||
+              a.id.localeCompare(b.id)
+            );
+          },
         ),
       ] as const)
       .sort((a, b) => a[0].localeCompare(b[0]));
-  }, [filteredEvents]);
+  }, [filteredSurveillanceEvents, surveillanceSort]);
 
   const totalSurveillanceEvents = useMemo(
     () =>
@@ -384,6 +494,81 @@ export default function ManagementSummary() {
     [surveillanceByOperator],
   );
 
+  // Other Duties log records are derived after applying the shared period filter.
+  // Joining arrays here keeps all assigned people visible while providing stable
+  // values for display and sorting, without changing the roster data.
+  const otherDutiesRecords = useMemo<OtherDutiesRecord[]>(() => {
+    return filteredEvents
+      .filter(
+        ev =>
+          ev.eventType === 'Other Duties' &&
+          (effectiveOtherDutiesActivity === '' ||
+            ev.subType === effectiveOtherDutiesActivity),
+      )
+      .map(ev => {
+        const other = ev as RosterEvent & {
+          eventType: 'Other Duties';
+          operators?: string[];
+          subType?: string;
+          remarks?: string;
+        };
+        const valuesForDisplay = (values?: unknown) => {
+          if (Array.isArray(values)) {
+            return values
+              .map(value => String(value ?? '').trim())
+              .filter(Boolean)
+              .join(', ') || '—';
+          }
+          return String(values ?? '').trim() || '—';
+        };
+        return {
+          id: ev.id,
+          date: ev.date || '',
+          startTime: ev.startTime || '',
+          endTime: ev.endTime || '',
+          activity: other.subType?.trim() || '—',
+          operators: valuesForDisplay(other.operators),
+          inspectors: valuesForDisplay(ev.inspectors),
+          remarks: other.remarks?.trim() || '—',
+        };
+      });
+  }, [filteredEvents, effectiveOtherDutiesActivity]);
+
+  const sortedOtherDutiesRecords = useMemo(() => {
+    const { key, direction } = otherDutiesSort;
+    const directionMultiplier = direction === 'asc' ? 1 : -1;
+    const valueForSort = (record: OtherDutiesRecord) => {
+      if (key === 'date') return `${record.date}\u0000${record.startTime}`;
+      if (key === 'inspector') return record.inspectors;
+      if (key === 'operator') return record.operators;
+      return record.activity;
+    };
+    return [...otherDutiesRecords].sort((a, b) =>
+      (valueForSort(a).localeCompare(valueForSort(b), undefined, {
+        sensitivity: 'base',
+        numeric: true,
+      }) * directionMultiplier) ||
+      a.id.localeCompare(b.id),
+    );
+  }, [otherDutiesRecords, otherDutiesSort]);
+
+  const setOtherDutiesSortKey = (
+    key: 'inspector' | 'operator' | 'activity' | 'date',
+  ) => {
+    setOtherDutiesSort(current =>
+      current.key === key
+        ? { key, direction: current.direction === 'asc' ? 'desc' : 'asc' }
+        : { key, direction: key === 'date' ? 'desc' : 'asc' },
+    );
+  };
+
+  const otherDutiesSortLabel = (key: typeof otherDutiesSort.key) =>
+    otherDutiesSort.key === key
+      ? otherDutiesSort.direction === 'asc'
+        ? ' (ascending)'
+        : ' (descending)'
+      : '';
+
   const periodLabel =
     period === 'rolling12'
       ? `${twelveMonthsAgoISO()} → ${endOfCurrentMonthISO()}`
@@ -392,6 +577,10 @@ export default function ManagementSummary() {
           ? `${fmtDate(customFromISO)} → ${fmtDate(customToISO)}`
           : 'Enter a valid date range'
         : fmtMonthLabel(selectedMonth);
+
+  const summaryCardClass = 'bg-card border border-border rounded-lg overflow-hidden';
+  const summaryCardHeaderClass =
+    'flex flex-col items-start justify-between gap-4 border-b border-border px-5 py-4 sm:flex-row';
 
   return (
     <div className="flex flex-col flex-1 overflow-hidden bg-background">
@@ -405,7 +594,7 @@ export default function ManagementSummary() {
       {/* Scrollable body */}
       <div className="flex-1 overflow-y-auto">
         <Tabs defaultValue="overview" className="p-6">
-          <TabsList>
+          <TabsList className="max-w-full overflow-x-auto">
             <TabsTrigger value="overview" className="flex items-center gap-1.5">
               <BarChart2 className="w-3.5 h-3.5" />
               Overview
@@ -418,71 +607,80 @@ export default function ManagementSummary() {
               <ClipboardList className="w-3.5 h-3.5" />
               Surveillance Log
             </TabsTrigger>
+            <TabsTrigger value="other-duties" className="flex items-center gap-1.5">
+              <ClipboardList className="w-3.5 h-3.5" />
+              Other Duties Log
+            </TabsTrigger>
           </TabsList>
+
+          {/* Shared time-range controls — apply to every tab */}
+          <div className="mt-6 flex flex-wrap items-center gap-3 justify-between">
+            <div className="inline-flex items-center bg-muted p-1 rounded-lg gap-0.5">
+              {(['month', 'rolling12', 'custom'] as const).map((p) => (
+                <button
+                  key={p}
+                  onClick={() => setPeriod(p)}
+                  className={`px-3 py-1 text-sm font-medium rounded-md transition-all ${
+                    period === p
+                      ? 'bg-background text-foreground shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  {p === 'month' ? 'Month' : p === 'rolling12' ? 'Last 12 months' : 'Custom'}
+                </button>
+              ))}
+            </div>
+
+            {period === 'month' ? (
+              <select
+                value={selectedMonth}
+                onChange={e => setSelectedMonth(e.target.value)}
+                className="h-8 rounded border border-border bg-card px-2.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-colors"
+              >
+                {availableMonths.length === 0
+                  ? <option value={currentYYYYMM()}>{fmtMonthLabel(currentYYYYMM())}</option>
+                  : availableMonths.map(ym => (
+                      <option key={ym} value={ym}>{fmtMonthLabel(ym)}</option>
+                    ))
+                }
+              </select>
+            ) : period === 'custom' ? (
+              <div className="flex items-center gap-2">
+                <input
+                  inputMode="numeric"
+                  maxLength={6}
+                  value={customFrom}
+                  onChange={e => setCustomFrom(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  placeholder="DDMMYY"
+                  aria-label="Custom range start date in DDMMYY format"
+                  className="h-8 w-24 rounded border border-border bg-card px-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-colors"
+                />
+                <span className="text-xs text-muted-foreground">to</span>
+                <input
+                  inputMode="numeric"
+                  maxLength={6}
+                  value={customTo}
+                  onChange={e => setCustomTo(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  placeholder="DDMMYY"
+                  aria-label="Custom range end date in DDMMYY format"
+                  className="h-8 w-24 rounded border border-border bg-card px-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-colors"
+                />
+                {(!customFromISO || !customToISO || customFromISO > customToISO) && (
+                  <span className="text-xs text-destructive">Use valid DDMMYY dates</span>
+                )}
+              </div>
+            ) : null}
+
+            <span className="text-xs text-muted-foreground tabular-nums ml-auto">
+              {periodLabel}
+            </span>
+          </div>
 
           {/* ── Overview tab ─────────────────────────────────────────────── */}
           <TabsContent value="overview" className="mt-6 space-y-6">
 
-            {/* Controls row: period + metric toggles */}
-            <div className="flex flex-wrap items-center gap-3 justify-between">
-              <div className="inline-flex items-center bg-muted p-1 rounded-lg gap-0.5">
-                {(['month', 'rolling12', 'custom'] as const).map((p) => (
-                  <button
-                    key={p}
-                    onClick={() => setPeriod(p)}
-                    className={`px-3 py-1 text-sm font-medium rounded-md transition-all ${
-                      period === p
-                        ? 'bg-background text-foreground shadow-sm'
-                        : 'text-muted-foreground hover:text-foreground'
-                    }`}
-                  >
-                    {p === 'month' ? 'Month' : p === 'rolling12' ? 'Last 12 months' : 'Custom'}
-                  </button>
-                ))}
-              </div>
-
-              {period === 'month' ? (
-                <select
-                  value={selectedMonth}
-                  onChange={e => setSelectedMonth(e.target.value)}
-                  className="h-8 rounded border border-border bg-card px-2.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-colors"
-                >
-                  {availableMonths.length === 0
-                    ? <option value={currentYYYYMM()}>{fmtMonthLabel(currentYYYYMM())}</option>
-                    : availableMonths.map(ym => (
-                        <option key={ym} value={ym}>{fmtMonthLabel(ym)}</option>
-                      ))
-                  }
-                </select>
-              ) : period === 'custom' ? (
-                <div className="flex items-center gap-2">
-                  <input
-                    inputMode="numeric"
-                    maxLength={6}
-                    value={customFrom}
-                    onChange={e => setCustomFrom(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                    placeholder="DDMMYY"
-                    aria-label="Custom range start date in DDMMYY format"
-                    className="h-8 w-24 rounded border border-border bg-card px-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-colors"
-                  />
-                  <span className="text-xs text-muted-foreground">to</span>
-                  <input
-                    inputMode="numeric"
-                    maxLength={6}
-                    value={customTo}
-                    onChange={e => setCustomTo(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                    placeholder="DDMMYY"
-                    aria-label="Custom range end date in DDMMYY format"
-                    className="h-8 w-24 rounded border border-border bg-card px-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-colors"
-                  />
-                  {(!customFromISO || !customToISO || customFromISO > customToISO) && (
-                    <span className="text-xs text-destructive">Use valid DDMMYY dates</span>
-                  )}
-                </div>
-              ) : (
-                <span className="text-xs text-muted-foreground tabular-nums">{periodLabel}</span>
-              )}
-
+            {/* Overview-only metric toggle */}
+            <div className="flex justify-end">
               {/* Metric toggle — right side */}
               <div className="inline-flex items-center bg-muted p-1 rounded-lg gap-0.5 ml-auto">
                 {(['count', 'hours'] as const).map((m) => (
@@ -501,7 +699,7 @@ export default function ManagementSummary() {
               </div>
             </div>
 
-            {filteredEvents.length === 0 ? (
+            {summaryEvents.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-20 gap-2 text-muted-foreground">
                 <BarChart2 className="w-8 h-8 opacity-30" />
                 <p className="text-sm">No events found for this period.</p>
@@ -596,39 +794,68 @@ export default function ManagementSummary() {
                       {workloadList.map(([name, row]) => {
                         const primaryVal = metric === 'hours' ? row.mins : row.count;
                         const barW = primaryVal / maxVal;
+                        const segments = DUTY_TYPES.map(t => ({
+                          type: t,
+                          value: metric === 'hours'
+                            ? (row.byTypeMins[t] ?? 0)
+                            : (row.byType[t] ?? 0),
+                        })).filter(segment => segment.value > 0);
                         return (
                           <div key={name} className="flex items-center gap-3">
                             <div className="w-40 shrink-0 text-xs text-foreground truncate" title={name}>
                               {name}
                             </div>
-                            <div className="flex flex-1 items-center gap-2">
-                              {/* Stacked segmented bar */}
-                              <div className="flex-1 h-4 bg-muted rounded overflow-hidden">
+                            <div className="flex min-w-0 flex-1 flex-col gap-1">
+                              <div className="flex min-w-0 items-center gap-2">
+                                {/* Stacked segmented bar */}
                                 <div
-                                  className="flex h-full transition-all duration-300"
-                                  style={{ width: `${barW * 100}%` }}
+                                  className="flex h-4 min-w-0 flex-1 overflow-hidden rounded bg-muted"
+                                  aria-label={`${name}: ${metric === 'hours' ? fmtHours(primaryVal) : `${primaryVal} events`}`}
                                 >
-                                  {DUTY_TYPES.map(t => {
-                                    const seg = metric === 'hours'
-                                      ? (row.byTypeMins[t] ?? 0)
-                                      : (row.byType[t] ?? 0);
-                                    if (seg === 0) return null;
-                                    const segPct = primaryVal > 0 ? (seg / primaryVal) * 100 : 0;
+                                  <div
+                                    className="flex h-full transition-all duration-300"
+                                    style={{ width: `${barW * 100}%` }}
+                                  >
+                                    {segments.map(({ type, value }) => {
+                                      const segPct = primaryVal > 0 ? (value / primaryVal) * 100 : 0;
+                                      const label = metric === 'hours' ? fmtBarHours(value) : value;
+                                      return (
+                                        <div
+                                          key={type}
+                                          className={`h-full ${TYPE_BG[type]} flex min-w-0 items-center justify-center overflow-hidden text-[9px] font-semibold leading-none text-white`}
+                                          style={{ width: `${segPct}%` }}
+                                        >
+                                          {metric !== 'hours' && (
+                                            <span className="inline truncate px-0.5">
+                                              {label}
+                                            </span>
+                                          )}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                                {/* Total value stays outside the proportional bar. */}
+                                <span className={`${metric === 'hours' ? 'w-20' : 'w-14'} shrink-0 whitespace-nowrap text-right text-xs font-semibold tabular-nums text-foreground`}>
+                                  {metric === 'hours' ? fmtHours(primaryVal) : primaryVal}
+                                </span>
+                              </div>
+                              {metric === 'hours' && (
+                                <div
+                                  className="flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-[10px] leading-tight text-muted-foreground"
+                                  aria-label={`${name} duty hour breakdown`}
+                                >
+                                  {DUTY_TYPES.map(type => {
+                                    const value = row.byTypeMins[type] ?? 0;
                                     return (
-                                      <div
-                                        key={t}
-                                        className={`h-full ${TYPE_BG[t]}`}
-                                        style={{ width: `${segPct}%` }}
-                                        title={`${TYPE_LABEL[t]}: ${metric === 'hours' ? fmtHours(seg) : seg}`}
-                                      />
+                                      <span key={type} className="inline-flex min-w-0 items-center gap-1 whitespace-nowrap">
+                                        <span className={`h-2 w-2 shrink-0 rounded-sm ${TYPE_BG[type]}`} />
+                                        {TYPE_LABEL[type]}: {value === 0 ? '0h' : fmtBarHours(value)}
+                                      </span>
                                     );
                                   })}
                                 </div>
-                              </div>
-                              {/* Value label */}
-                              <span className="w-14 text-xs font-semibold text-foreground shrink-0 tabular-nums text-right">
-                                {metric === 'hours' ? fmtHours(primaryVal) : primaryVal}
-                              </span>
+                              )}
                             </div>
                           </div>
                         );
@@ -642,7 +869,7 @@ export default function ManagementSummary() {
                   <div className="bg-card border border-border rounded-lg p-5">
                     <h2 className="text-sm font-semibold text-foreground mb-1">Operator Requests</h2>
                     <p className="text-xs text-muted-foreground mb-4">
-                      Simulator sessions per operator — sorted highest to lowest
+                      Operator Request sessions per operator — sorted highest to lowest
                     </p>
 
                     <div className="space-y-3">
@@ -672,22 +899,54 @@ export default function ManagementSummary() {
           </TabsContent>
 
           {/* ── Surveillance log tab ───────────────────────────────────────── */}
-          <TabsContent value="surveillance" className="mt-6 space-y-4">
-            <div className="bg-card border border-border rounded-lg overflow-hidden">
-              <div className="px-5 py-4 border-b border-border">
-                <p className="text-sm font-semibold text-foreground">
-                  Surveillance Activity Log
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  {totalSurveillanceEvents} event{totalSurveillanceEvents !== 1 ? 's' : ''} across {surveillanceByOperator.length} operator{surveillanceByOperator.length !== 1 ? 's' : ''} · {periodLabel}
-                </p>
+          <TabsContent value="surveillance" className="mt-6 space-y-6">
+            <div className={summaryCardClass}>
+              <div className={summaryCardHeaderClass}>
+                <div>
+                  <p className="text-sm font-semibold text-foreground">
+                    Surveillance Activity Log
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {totalSurveillanceEvents} event{totalSurveillanceEvents !== 1 ? 's' : ''} across {surveillanceByOperator.length} operator{surveillanceByOperator.length !== 1 ? 's' : ''} · {periodLabel}
+                  </p>
+                </div>
+                <div className="flex w-full flex-col items-stretch gap-2 sm:w-auto sm:flex-row sm:items-center sm:justify-end sm:gap-3">
+                  <label className="flex w-full min-w-0 items-center gap-2 text-xs text-muted-foreground whitespace-nowrap sm:w-auto">
+                    Filter activity
+                    <select
+                      value={effectiveSurveillanceActivity}
+                      onChange={e => setSelectedSurveillanceActivity(e.target.value)}
+                      aria-label="Filter surveillance events by activity"
+                      className="h-8 min-w-0 flex-1 rounded border border-border bg-card px-2.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-colors sm:flex-none"
+                    >
+                      <option value="">All activities</option>
+                      {surveillanceActivities.map(activity => (
+                        <option key={activity} value={activity}>{activity}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="flex w-full min-w-0 items-center gap-2 text-xs text-muted-foreground whitespace-nowrap sm:w-auto">
+                    Sort events
+                    <select
+                      value={surveillanceSort}
+                      onChange={e => setSurveillanceSort(e.target.value as 'date' | 'type')}
+                      aria-label="Sort surveillance events"
+                      className="h-8 min-w-0 flex-1 rounded border border-border bg-card px-2.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-colors sm:flex-none"
+                    >
+                      <option value="date">Date</option>
+                      <option value="type">Type</option>
+                    </select>
+                  </label>
+                </div>
               </div>
 
               {surveillanceByOperator.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-16 gap-2 text-center">
                   <ClipboardList className="w-7 h-7 text-muted-foreground/30" />
                   <p className="text-sm text-muted-foreground">
-                    No surveillance events found for this period.
+                    {effectiveSurveillanceActivity
+                      ? `No surveillance events found for ${effectiveSurveillanceActivity} in this period.`
+                      : 'No surveillance events found for this period.'}
                   </p>
                 </div>
               ) : (
@@ -707,11 +966,18 @@ export default function ManagementSummary() {
                       </div>
 
                       <div className="overflow-x-auto rounded border border-border">
-                        <table className="w-full min-w-[620px] text-sm">
+                        <table className="w-full min-w-[620px] table-fixed text-sm">
+                          <colgroup>
+                            <col className="w-[14%]" />
+                            <col className="w-[14%]" />
+                            <col className="w-[20%]" />
+                            <col className="w-[28%]" />
+                            <col className="w-[24%]" />
+                          </colgroup>
                           <thead className="bg-muted/40 border-b border-border">
                             <tr>
-                              <th className="text-left px-3 py-2 text-[10px] font-semibold text-muted-foreground uppercase tracking-wide w-28">Date</th>
-                              <th className="text-left px-3 py-2 text-[10px] font-semibold text-muted-foreground uppercase tracking-wide w-28">Time</th>
+                              <th className="text-left px-3 py-2 text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Date</th>
+                              <th className="text-left px-3 py-2 text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Time</th>
                               <th className="text-left px-3 py-2 text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Type</th>
                               <th className="text-left px-3 py-2 text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Details</th>
                               <th className="text-left px-3 py-2 text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Inspectors</th>
@@ -728,13 +994,13 @@ export default function ManagementSummary() {
                                     ? `${record.startTime}–${record.endTime}`
                                     : 'All day'}
                                 </td>
-                                <td className="px-3 py-2.5 text-xs font-medium text-foreground">
+                                <td className="break-words px-3 py-2.5 text-xs font-medium text-foreground">
                                   {record.types.join(', ')}
                                 </td>
-                                <td className="px-3 py-2.5 text-xs text-foreground">
+                                <td className="break-words px-3 py-2.5 text-xs text-foreground">
                                   {record.details || '—'}
                                 </td>
-                                <td className="px-3 py-2.5 text-xs text-foreground">
+                                <td className="break-words px-3 py-2.5 text-xs text-foreground">
                                   {record.inspectors.length > 0
                                     ? record.inspectors.join(', ')
                                     : '—'}
@@ -751,10 +1017,110 @@ export default function ManagementSummary() {
             </div>
           </TabsContent>
 
+          {/* ── Other Duties log tab ───────────────────────────────────────── */}
+          <TabsContent value="other-duties" className="mt-6 space-y-6">
+            <div className={summaryCardClass}>
+              <div className={summaryCardHeaderClass}>
+                <div>
+                  <p className="text-sm font-semibold text-foreground">
+                    Other Duties Log
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {otherDutiesRecords.length} event{otherDutiesRecords.length !== 1 ? 's' : ''} · {periodLabel}
+                  </p>
+                </div>
+                <label className="flex w-full min-w-0 items-center gap-2 text-xs text-muted-foreground whitespace-nowrap sm:w-auto">
+                  Filter activity
+                  <select
+                    value={effectiveOtherDutiesActivity}
+                    onChange={e => setSelectedOtherDutiesActivity(e.target.value)}
+                    aria-label="Filter Other Duties events by activity"
+                    className="h-8 min-w-0 flex-1 rounded border border-border bg-card px-2.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-colors sm:flex-none"
+                  >
+                    <option value="">All Duties</option>
+                    {dutySubTypes.map(activity => (
+                      <option key={activity} value={activity}>{activity}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              {otherDutiesRecords.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-16 gap-2 text-center">
+                  <ClipboardList className="w-7 h-7 text-muted-foreground/30" />
+                  <p className="text-sm text-muted-foreground">
+                    {effectiveOtherDutiesActivity
+                      ? `No Other Duties events found for ${effectiveOtherDutiesActivity} in this period.`
+                      : 'No Other Duties events found for this period.'}
+                  </p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[900px] text-sm">
+                    <thead className="bg-muted/40 border-b border-border">
+                      <tr>
+                        {([
+                          ['date', 'Date'],
+                          ['inspector', 'Inspectors'],
+                          ['operator', 'Operators'],
+                          ['activity', 'Activity'],
+                        ] as const).map(([key, label]) => {
+                          const active = otherDutiesSort.key === key;
+                          const sortDescription = `${label}${otherDutiesSortLabel(key)}`;
+                          return (
+                            <th
+                              key={key}
+                              scope="col"
+                              className="text-left px-3 py-2 text-[10px] font-semibold text-muted-foreground uppercase tracking-wide"
+                            >
+                              <button
+                                type="button"
+                                onClick={() => setOtherDutiesSortKey(key)}
+                                aria-label={`Sort by ${sortDescription}`}
+                                className="inline-flex items-center gap-1 rounded-sm hover:text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
+                              >
+                                {label}
+                                {active && (
+                                  otherDutiesSort.direction === 'asc'
+                                    ? <ArrowUp className="w-3 h-3" aria-hidden="true" />
+                                    : <ArrowDown className="w-3 h-3" aria-hidden="true" />
+                                )}
+                              </button>
+                            </th>
+                          );
+                        })}
+                        <th className="text-left px-3 py-2 text-[10px] font-semibold text-muted-foreground uppercase tracking-wide w-28">Time</th>
+                        <th className="text-left px-3 py-2 text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Remarks</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sortedOtherDutiesRecords.map(record => (
+                        <tr key={record.id} className="border-b border-border last:border-0">
+                          <td className="px-3 py-2.5 text-xs text-muted-foreground tabular-nums whitespace-nowrap">
+                            {record.date ? fmtDate(record.date) : '—'}
+                          </td>
+                          <td className="px-3 py-2.5 text-xs text-foreground">{record.inspectors}</td>
+                          <td className="px-3 py-2.5 text-xs text-foreground">{record.operators}</td>
+                          <td className="px-3 py-2.5 text-xs font-medium text-foreground">{record.activity}</td>
+                          <td className="px-3 py-2.5 text-xs text-muted-foreground tabular-nums whitespace-nowrap">
+                            {record.startTime && record.endTime
+                              ? `${record.startTime}–${record.endTime}`
+                              : 'All day'}
+                          </td>
+                          <td className="px-3 py-2.5 text-xs text-foreground">{record.remarks}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </TabsContent>
+
           {/* ── OJT Tracker tab ──────────────────────────────────────────── */}
-          <TabsContent value="ojt" className="mt-6 space-y-4">
+          <TabsContent value="ojt" className="mt-6 space-y-6">
             {eligibleInspectors.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-24 gap-3 bg-card border border-border rounded-lg text-center">
+              <div className={`${summaryCardClass} flex flex-col items-center justify-center gap-3 px-5 py-24 text-center`}>
                 <ClipboardList className="w-10 h-10 text-muted-foreground/30" />
                 <p className="text-sm font-semibold text-foreground">No eligible trainees</p>
                 <p className="text-xs text-muted-foreground max-w-xs">
@@ -763,40 +1129,39 @@ export default function ManagementSummary() {
                 </p>
               </div>
             ) : (
-              <>
-                {/* Inspector dropdown */}
-                <div className="flex items-center gap-3">
-                  <label className="text-xs font-medium text-muted-foreground whitespace-nowrap">
+              <div className={summaryCardClass}>
+                <div className={summaryCardHeaderClass}>
+                  <div>
+                    <p className="text-sm font-semibold text-foreground">OJT Progress</p>
+                    <p className="text-xs text-muted-foreground">
+                      {selectedTrainee
+                        ? `${(ojtLedger[selectedTrainee] ?? []).length} OJT session${(ojtLedger[selectedTrainee] ?? []).length !== 1 ? 's' : ''} recorded`
+                        : 'Select an inspector to view OJT progress'}
+                    </p>
+                  </div>
+                  <label className="flex w-full min-w-0 items-center gap-2 text-xs font-medium text-muted-foreground whitespace-nowrap sm:w-auto">
                     Inspector
+                    <select
+                      value={selectedTrainee}
+                      onChange={e => setSelectedTrainee(e.target.value)}
+                      className="h-8 min-w-0 flex-1 rounded border border-border bg-card px-2.5 text-sm font-normal text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-colors sm:w-56 sm:flex-none"
+                    >
+                      <option value="">Select an inspector…</option>
+                      {eligibleInspectors.map(ins => (
+                        <option key={ins.id} value={ins.name}>{ins.name}</option>
+                      ))}
+                    </select>
                   </label>
-                  <select
-                    value={selectedTrainee}
-                    onChange={e => setSelectedTrainee(e.target.value)}
-                    className="h-8 rounded border border-border bg-card px-2.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-colors"
-                  >
-                    <option value="">Select an inspector…</option>
-                    {eligibleInspectors.map(ins => (
-                      <option key={ins.id} value={ins.name}>{ins.name}</option>
-                    ))}
-                  </select>
                 </div>
 
                 {/* Activity table */}
                 {!selectedTrainee ? (
-                  <div className="flex flex-col items-center justify-center py-16 gap-2 text-center bg-card border border-border rounded-lg">
+                  <div className="flex flex-col items-center justify-center gap-2 px-5 py-16 text-center">
                     <ClipboardList className="w-7 h-7 text-muted-foreground/30" />
                     <p className="text-sm text-muted-foreground">Select an inspector to view OJT progress</p>
                   </div>
                 ) : (
-                  <div className="bg-card border border-border rounded-lg overflow-hidden">
-                    {/* Sub-header */}
-                    <div className="px-5 py-3 border-b border-border">
-                      <p className="text-sm font-semibold text-foreground">{selectedTrainee}</p>
-                      <p className="text-xs text-muted-foreground">
-                        {(ojtLedger[selectedTrainee] ?? []).length} OJT session{(ojtLedger[selectedTrainee] ?? []).length !== 1 ? 's' : ''} recorded
-                      </p>
-                    </div>
-
+                  <div className="overflow-x-auto">
                     <table className="w-full text-sm">
                       <thead className="sticky top-0 bg-card border-b border-border z-10">
                         <tr>
@@ -840,7 +1205,7 @@ export default function ManagementSummary() {
                     </table>
                   </div>
                 )}
-              </>
+              </div>
             )}
           </TabsContent>
         </Tabs>

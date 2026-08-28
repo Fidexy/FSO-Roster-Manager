@@ -75,8 +75,8 @@ function toIcsDateTime(date: string, time: string): string {
 function buildSummary(ev: RosterEvent): string {
   const ea = ev as Record<string, unknown>;
   switch (ev.eventType) {
-    case 'Simulator':
-      return `Simulator \u2013 ${ea.operator ?? ''} ${ea.activity ?? ''}`.trim();
+    case 'Operator Request':
+      return `Operator Request \u2013 ${ea.operator ?? ''} ${ea.activity ?? ''}`.trim();
     case 'Surveillance':
       return `Surveillance \u2013 ${ea.operator ?? ''} ${((ea.surveillanceTypes as string[]) ?? []).join(', ')}`.trim();
     case 'Other Duties':
@@ -100,8 +100,9 @@ function buildDescription(ev: RosterEvent): string {
   const names = (ev.inspectors ?? []).map(firstNameOf).join(', ');
   if (names) parts.push(`Inspectors: ${esc(names)}`);
 
-  if (ev.eventType === 'Simulator') {
-    if (ea.simulatorCode) parts.push(`Code: ${esc(ea.simulatorCode)}`);
+  if (ev.eventType === 'Operator Request') {
+    const codes = (ea.simulatorCodes as string[] | undefined)?.join(', ') ?? (ea.simulatorCode as string | undefined);
+    if (codes) parts.push(`Code: ${esc(codes)}`);
     if (ea.candidateName) parts.push(`Candidate: ${esc(ea.candidateName)}`);
   } else if (ev.eventType === 'Surveillance') {
     if (ev.details) parts.push(`Details: ${esc(ev.details)}`);

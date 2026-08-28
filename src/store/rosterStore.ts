@@ -5,7 +5,34 @@ import { createContext, useContext } from "react";
 
 // ─── Event Types ──────────────────────────────────────────────────────────────
 
-export type EventType = "Simulator" | "Surveillance" | "Other Duties" | "Leave";
+export type EventType = "Operator Request" | "Surveillance" | "Other Duties" | "Leave";
+
+/** User-editable event fields whose immediately previous values can be shown. */
+export type EventHistoryField =
+  | "eventType"
+  | "date"
+  | "startTime"
+  | "endTime"
+  | "inspectors"
+  | "operator"
+  | "simulatorCodes"
+  | "aircraftType"
+  | "activity"
+  | "candidateName"
+  | "surveillanceTypes"
+  | "details"
+  | "operators"
+  | "subType"
+  | "otherDutiesShift"
+  | "customColor"
+  | "remarks"
+  | "leaveType"
+  | "leaveShift";
+
+export type EventHistoryValue = string | string[] | null;
+export type PreviousEventValues = Partial<
+  Record<EventHistoryField, EventHistoryValue>
+>;
 
 export type BaseEvent = {
   id: string;
@@ -26,17 +53,31 @@ export type BaseEvent = {
    * the hover card and Word export so viewers can see the update.
    */
   previousInspectors?: string[];
+  /**
+   * Set at commit time when the event time range changed. Holds the
+   * immediately previous start and end values for change highlighting.
+   */
+  previousStartTime?: string;
+  previousEndTime?: string;
+  /**
+   * Typed, serializable previous values for every editable field that changed
+   * in the most recent committed edit. A null value means the field was absent
+   * before the edit. Only the immediately preceding value is retained.
+   */
+  previousValues?: PreviousEventValues;
 };
 
-export type SimulatorEvent = BaseEvent & {
-  eventType: "Simulator";
+export type OperatorRequestEvent = BaseEvent & {
+  eventType: "Operator Request";
   operator: string;
+  /** All selected simulator device codes, in selection order. */
+  simulatorCodes: string[];
+  /** Legacy compatibility alias for the first selected code. */
   simulatorCode: string;
   aircraftType: string;
   activity: string;
   candidateName: string;
 };
-
 export type SurveillanceEvent = BaseEvent & {
   eventType: "Surveillance";
   operator: string;
@@ -49,22 +90,183 @@ export type SurveillanceEvent = BaseEvent & {
 export type LeaveEvent = BaseEvent & {
   eventType: "Leave";
   leaveType: string;
+  /** Set only when the AM or PM shortcut button was explicitly selected. */
+  leaveShift?: "AM" | "PM";
 };
 
 export type OtherDutiesEvent = BaseEvent & {
   eventType: "Other Duties";
   operators: string[]; // array of operator codes, 'N/A', or a custom string
   subType: string;
+  /** Set only when the AM or PM shortcut button was explicitly selected. */
+  otherDutiesShift?: "AM" | "PM";
   /** Optional color override used for Custom Other Duties entries. */
   customColor?: string;
   remarks?: string;
+  /** Append non-empty remarks to this event's calendar pill label. */
+  appendRemarkToCalendarPill?: boolean;
 };
 
 export type RosterEvent =
-  | SimulatorEvent
+  | OperatorRequestEvent
   | SurveillanceEvent
   | OtherDutiesEvent
   | LeaveEvent;
+
+export const EVENT_HISTORY_FIELDS: readonly EventHistoryField[] = [
+  "eventType",
+  "date",
+  "startTime",
+  "endTime",
+  "inspectors",
+  "operator",
+  "simulatorCodes",
+  "aircraftType",
+  "activity",
+  "candidateName",
+  "surveillanceTypes",
+  "details",
+  "operators",
+  "subType",
+  "otherDutiesShift",
+  "customColor",
+  "remarks",
+  "leaveType",
+  "leaveShift",
+];
+
+export const EVENT_HISTORY_LABELS: Record<EventHistoryField, string> = {
+  eventType: "Event type",
+  date: "Date",
+  startTime: "Start time",
+  endTime: "End time",
+  inspectors: "Inspectors",
+  operator: "Operator",
+  simulatorCodes: "Simulator codes",
+  aircraftType: "Aircraft type",
+  activity: "Activity",
+  candidateName: "Candidate",
+  surveillanceTypes: "Surveillance types",
+  details: "Details",
+  operators: "Operators",
+  subType: "Duty type",
+  otherDutiesShift: "Shift",
+  customColor: "Custom colour",
+  remarks: "Remarks",
+  leaveType: "Leave type",
+  leaveShift: "Shift",
+};
+
+function own(obj: object, key: PropertyKey): boolean {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+/** Read a field through compatibility aliases and normalize absent strings. */
+export function getEventFieldValue(
+  event: RosterEvent,
+  field: EventHistoryField,
+): EventHistoryValue {
+  const rawEvent = event as unknown as Record<string, unknown>;
+  if (field === "simulatorCodes") {
+    if (Array.isArray(rawEvent.simulatorCodes))
+      return [...rawEvent.simulatorCodes] as string[];
+    return typeof rawEvent.simulatorCode === "string" &&
+      rawEvent.simulatorCode.length > 0
+      ? [rawEvent.simulatorCode]
+      : null;
+  }
+  const value = rawEvent[field];
+  if (Array.isArray(value)) return [...value] as string[];
+  if (typeof value === "string") return value === "" ? null : value;
+  return null;
+}
+
+/**
+ * Read the new history map, falling back to the two legacy fields so imported
+ * rosters continue to display their existing history.
+ */
+export function getEventPreviousValue(
+  event: RosterEvent,
+  field: EventHistoryField,
+): { hasPrevious: boolean; value: EventHistoryValue } {
+  if (event.previousValues && own(event.previousValues, field)) {
+    return { hasPrevious: true, value: event.previousValues[field] ?? null };
+  }
+  if (field === "inspectors" && event.previousInspectors !== undefined)
+    return { hasPrevious: true, value: [...event.previousInspectors] };
+  if (field === "startTime" && event.previousStartTime !== undefined)
+    return { hasPrevious: true, value: event.previousStartTime };
+  if (field === "endTime" && event.previousEndTime !== undefined)
+    return { hasPrevious: true, value: event.previousEndTime };
+  return { hasPrevious: false, value: null };
+}
+
+export function eventHistoryValuesEqual(
+  field: EventHistoryField,
+  a: EventHistoryValue,
+  b: EventHistoryValue,
+): boolean {
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b)) return false;
+    const left = field === "inspectors" ? [...a].sort() : a;
+    const right = field === "inspectors" ? [...b].sort() : b;
+    return left.length === right.length && left.every((v, i) => v === right[i]);
+  }
+  return a === b;
+}
+
+export function hasEventFieldHistory(
+  event: RosterEvent,
+  field: EventHistoryField,
+): boolean {
+  const previous = getEventPreviousValue(event, field);
+  return (
+    previous.hasPrevious &&
+    !eventHistoryValuesEqual(field, previous.value, getEventFieldValue(event, field))
+  );
+}
+
+/** Capture only fields changed by an edit, retaining the old value (or null). */
+export function capturePreviousEventValues(
+  original: RosterEvent,
+  updated: RosterEvent,
+): PreviousEventValues {
+  const previous: PreviousEventValues = {};
+  for (const field of EVENT_HISTORY_FIELDS) {
+    const oldValue = getEventFieldValue(original, field);
+    const newValue = getEventFieldValue(updated, field);
+    if (!eventHistoryValuesEqual(field, oldValue, newValue))
+      previous[field] = Array.isArray(oldValue) ? [...oldValue] : oldValue;
+  }
+  return previous;
+}
+
+function applyCommittedHistory(
+  event: RosterEvent,
+  original: RosterEvent | undefined,
+): RosterEvent {
+  if (!original) return event;
+  const captured = capturePreviousEventValues(original, event);
+  if (Object.keys(captured).length === 0) return event;
+  if (own(captured, "startTime") || own(captured, "endTime")) {
+    // The UI and legacy exports present time as a range, so retain both old
+    // endpoints even when only one endpoint changed.
+    captured.startTime = original.startTime;
+    captured.endTime = original.endTime;
+  }
+
+  const withHistory: RosterEvent = {
+    ...event,
+    previousValues: captured,
+  };
+  if (own(captured, "inspectors"))
+    withHistory.previousInspectors = captured.inspectors as string[];
+  if (own(captured, "startTime") && own(captured, "endTime")) {
+    withHistory.previousStartTime = captured.startTime as string;
+    withHistory.previousEndTime = captured.endTime as string;
+  }
+  return withHistory;
+}
 
 // ─── Inspector / Qualification Types ─────────────────────────────────────────
 
@@ -75,6 +277,24 @@ export type Inspector = {
   position: string;
   email?: string;
 };
+
+/** Compare inspectors by full name, case-insensitively, with id as a stable tie-breaker. */
+export function compareInspectorsByName(
+  a: { name: string; id?: string },
+  b: { name: string; id?: string },
+): number {
+  return (
+    a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) ||
+    (a.id ?? "").localeCompare(b.id ?? "", undefined, { sensitivity: "base" })
+  );
+}
+
+/** Return inspectors in case-insensitive alphabetical full-name order. */
+export function sortInspectorsByName<T extends { name: string; id?: string }>(
+  inspectors: T[],
+): T[] {
+  return [...inspectors].sort(compareInspectorsByName);
+}
 
 /** Returns the first word of a full name — used for all roster/export display. */
 export function firstNameOf(fullName: string): string {
@@ -184,6 +404,11 @@ export const DEFAULT_DUTY_SUBTYPES: string[] = [
   "MOR Meeting",
   "Overseas Duties",
 ];
+
+export const DEFAULT_OTHER_DUTIES_COLORS: Record<string, string> =
+  Object.fromEntries(
+    DEFAULT_DUTY_SUBTYPES.map((subType) => [subType, "#9333ea"]),
+  );
 
 /** Maps simulator code → aircraft type */
 export type SimulatorMap = Record<string, string>;
@@ -318,7 +543,7 @@ export const DEFAULT_INSPECTORS: Inspector[] = [
     email: "scttso@cad.gov.hk",
   },
   { id: "19", name: "Dominic Hui", position: "OI", email: "dtmhui@cad.gov.hk" },
-];
+].sort(compareInspectorsByName);
 
 const ALL_POSITIONS = [
   "FOI(C)1",
@@ -370,6 +595,7 @@ export type RosterState = {
   qualifications: Qualifications;
   operators: string[];
   operatorColors: Record<string, string>;
+  otherDutiesColors: Record<string, string>;
   simulatorActivities: string[];
   surveillanceActivities: string[];
   surveillanceQualifications: Qualifications;
@@ -394,6 +620,13 @@ export type RosterAction =
   | { type: "COMMIT_EVENT"; payload: string }
   | { type: "COMMIT_ALL" }
   | { type: "REMOVE_CALENDAR_EVENT"; payload: string }
+  | {
+      type: "CLEAR_EVENT_HISTORY";
+      payload: {
+        id: string;
+        kind: EventHistoryField | "inspectors" | "time";
+      };
+    }
   | { type: "ADD_INSPECTOR"; payload: Inspector }
   | { type: "REMOVE_INSPECTOR"; payload: string }
   | {
@@ -422,6 +655,10 @@ export type RosterAction =
     }
   | { type: "SET_OPERATOR_COLOR"; payload: { operator: string; color: string } }
   | {
+      type: "SET_OTHER_DUTIES_COLOR";
+      payload: { subType: string; color: string };
+    }
+  | {
       type: "SET_SIM_MAP_ENTRY";
       payload: { code: string; aircraftType: string };
     }
@@ -447,6 +684,10 @@ export type RosterContextValue = {
   commitEvent: (id: string) => void;
   commitAll: () => void;
   removeCalendarEvent: (id: string) => void;
+  clearEventHistory: (
+    id: string,
+    kind: EventHistoryField | "inspectors" | "time",
+  ) => void;
   addInspector: (inspector: Omit<Inspector, "id">) => void;
   removeInspector: (id: string) => void;
   toggleQualification: (activity: string, position: string) => void;
@@ -459,6 +700,7 @@ export type RosterContextValue = {
   removeListItem: (list: ListKey, value: string) => void;
   renameListItem: (list: ListKey, oldValue: string, newValue: string) => void;
   setOperatorColor: (operator: string, color: string) => void;
+  setOtherDutiesColor: (subType: string, color: string) => void;
   setSimMapEntry: (code: string, aircraftType: string) => void;
   removeSimMapEntry: (code: string) => void;
   setEditingEventId: (id: string | null) => void;
@@ -484,6 +726,7 @@ export const initialRosterState: RosterState = {
   qualifications: DEFAULT_QUALIFICATIONS,
   operators: [...DEFAULT_OPERATORS],
   operatorColors: { ...DEFAULT_OPERATOR_COLORS },
+  otherDutiesColors: { ...DEFAULT_OTHER_DUTIES_COLORS },
   simulatorActivities: [...DEFAULT_SIMULATOR_ACTIVITIES],
   surveillanceActivities: [...DEFAULT_SURVEILLANCE_ACTIVITIES],
   surveillanceQualifications: {
@@ -544,27 +787,19 @@ export function rosterReducer(
       const baseCalendar = sourceId
         ? state.calendarEvents.filter((e) => e.id !== sourceId)
         : state.calendarEvents;
-      // If this edit replaced an existing event, capture previousInspectors
-      // when the inspector list changed so the hover card can show the diff.
-      let previousInspectors: string[] | undefined;
-      if (sourceId) {
-        const original = state.calendarEvents.find((e) => e.id === sourceId);
-        if (original) {
-          const sortedOrig = [...original.inspectors].sort().join("\0");
-          const sortedNew = [...event.inspectors].sort().join("\0");
-          if (sortedOrig !== sortedNew)
-            previousInspectors = original.inspectors;
-        }
-      }
       // Strip the internal sourceEventId before placing on the calendar.
       // Restore the original event's ID so the HTML changelog diff can match
       // this committed edit to its snapshot entry (same ID = Changed, not Remove+Add).
       const { sourceEventId: _src, ...rest } = event as BaseEvent &
         Record<string, unknown>;
       const withOriginalId = sourceId ? { ...rest, id: sourceId } : rest;
-      const calendarEvent = previousInspectors
-        ? ({ ...withOriginalId, previousInspectors } as RosterEvent)
-        : (withOriginalId as RosterEvent);
+      const original = sourceId
+        ? state.calendarEvents.find((e) => e.id === sourceId)
+        : undefined;
+      const calendarEvent = applyCommittedHistory(
+        withOriginalId as RosterEvent,
+        original,
+      );
       return {
         ...state,
         stagingQueue: state.stagingQueue.filter((_, i) => i !== idx),
@@ -582,10 +817,10 @@ export function rosterReducer(
       const baseCalendar = state.calendarEvents.filter(
         (e) => !sourceIds.has(e.id),
       );
-      // Build a lookup of original calendar events for inspector diffing
+      // Build a lookup of original calendar events for field diffing
       const originalMap = new Map(state.calendarEvents.map((e) => [e.id, e]));
       // Strip sourceEventId from every event before placing on the calendar;
-      // attach previousInspectors where the inspector list changed.
+      // attach previous values where the committed edit changed them.
       const stripped = state.stagingQueue.map((e) => {
         const { sourceEventId: _s, ...rest } = e as BaseEvent &
           Record<string, unknown>;
@@ -596,16 +831,7 @@ export function rosterReducer(
           : rest;
         if (e.sourceEventId) {
           const original = originalMap.get(e.sourceEventId);
-          if (original) {
-            const sortedOrig = [...original.inspectors].sort().join("\0");
-            const sortedNew = [...e.inspectors].sort().join("\0");
-            if (sortedOrig !== sortedNew) {
-              return {
-                ...withOriginalId,
-                previousInspectors: original.inspectors,
-              } as RosterEvent;
-            }
-          }
+          return applyCommittedHistory(withOriginalId as RosterEvent, original);
         }
         return withOriginalId as RosterEvent;
       });
@@ -624,6 +850,38 @@ export function rosterReducer(
       return {
         ...state,
         calendarEvents: state.calendarEvents.filter((_, i) => i !== idx),
+      };
+    }
+
+    case "CLEAR_EVENT_HISTORY": {
+      const { id, kind } = action.payload;
+      const event = state.calendarEvents.find((e) => e.id === id);
+      if (!event) return state;
+      const updated = { ...event };
+      const history = { ...(updated.previousValues ?? {}) };
+      if (kind === "inspectors") {
+        delete updated.previousInspectors;
+        delete history.inspectors;
+      } else if (kind === "time") {
+        delete updated.previousStartTime;
+        delete updated.previousEndTime;
+        delete history.startTime;
+        delete history.endTime;
+      } else {
+        delete history[kind];
+        if (kind === "startTime") {
+          delete updated.previousStartTime;
+        } else if (kind === "endTime") {
+          delete updated.previousEndTime;
+        }
+      }
+      if (Object.keys(history).length > 0) updated.previousValues = history;
+      else delete updated.previousValues;
+      return {
+        ...state,
+        calendarEvents: state.calendarEvents.map((e) =>
+          e.id === id ? updated : e,
+        ),
       };
     }
 
@@ -660,9 +918,10 @@ export function rosterReducer(
         state.surveillanceQualifications,
       );
 
-      const sortedInspectors = [...state.inspectors, newInspector].sort((a, b) =>
-        a.position.localeCompare(b.position, undefined, { sensitivity: "base" }),
-      );
+      const sortedInspectors = sortInspectorsByName([
+        ...state.inspectors,
+        newInspector,
+      ]);
       return {
         ...state,
         inspectors: sortedInspectors,
@@ -720,6 +979,15 @@ export function rosterReducer(
                 [value]: state.operatorColors[value] ?? "#6b7280",
               },
             }
+          : list === "dutySubTypes"
+            ? {
+                otherDutiesColors: {
+                  ...state.otherDutiesColors,
+                  [value]:
+                    state.otherDutiesColors[value] ??
+                    DEFAULT_OTHER_DUTIES_COLORS[DEFAULT_DUTY_SUBTYPES[0]],
+                },
+              }
           : {};
       const sorted = [...state[list], value].sort((a, b) =>
         a.localeCompare(b, undefined, { sensitivity: "base" }),
@@ -729,6 +997,15 @@ export function rosterReducer(
 
     case "REMOVE_LIST_ITEM": {
       const { list, value } = action.payload;
+      if (list === "dutySubTypes") {
+        const { [value]: _removed, ...otherDutiesColors } =
+          state.otherDutiesColors;
+        return {
+          ...state,
+          [list]: state[list].filter((v) => v !== value),
+          otherDutiesColors,
+        };
+      }
       return { ...state, [list]: state[list].filter((v) => v !== value) };
     }
 
@@ -747,6 +1024,14 @@ export function rosterReducer(
         const { [oldValue]: positions, ...restQuals } = state.surveillanceQualifications;
         return { ...state, [list]: renamed, surveillanceQualifications: { ...restQuals, [trimmed]: positions } };
       }
+      if (list === "dutySubTypes" && oldValue in state.otherDutiesColors) {
+        const { [oldValue]: color, ...restColors } = state.otherDutiesColors;
+        return {
+          ...state,
+          [list]: renamed,
+          otherDutiesColors: { ...restColors, [trimmed]: color },
+        };
+      }
       return { ...state, [list]: renamed };
     }
 
@@ -755,6 +1040,14 @@ export function rosterReducer(
       return {
         ...state,
         operatorColors: { ...state.operatorColors, [operator]: color },
+      };
+    }
+
+    case "SET_OTHER_DUTIES_COLOR": {
+      const { subType, color } = action.payload;
+      return {
+        ...state,
+        otherDutiesColors: { ...state.otherDutiesColors, [subType]: color },
       };
     }
 
@@ -805,6 +1098,9 @@ export function rosterReducer(
             id,
             sourceEventId: data.sourceEventId ?? e.sourceEventId,
             previousInspectors: data.previousInspectors ?? e.previousInspectors,
+            previousStartTime: data.previousStartTime ?? e.previousStartTime,
+            previousEndTime: data.previousEndTime ?? e.previousEndTime,
+            previousValues: data.previousValues ?? e.previousValues,
           } as RosterEvent;
         }),
       };
@@ -856,10 +1152,31 @@ export function generateId(): string {
   return `${Date.now()}-${_idCounter++}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-// ─── Persistence parse helpers ────────────────────────────────────────────────
-// These take raw strings (from localStorage OR Electron file storage) so they
-// work with the environment-aware async storage utility.
+/**
+ * Convert the retired event discriminator at the storage/import boundary.
+ * Simulator-specific fields are intentionally preserved; only eventType changes.
+ */
+export function normalizeLegacyEventType<T extends { eventType?: unknown }>(event: T): T {
+  if (event.eventType === "Simulator") {
+    return { ...event, eventType: "Operator Request" } as T;
+  }
+  return event;
+}
 
+/** Normalize the multi-code Operator Request shape at every storage boundary. */
+function normalizeSimulatorCodes(
+  normalized: Record<string, unknown>,
+): Record<string, unknown> {
+  if (normalized.eventType !== "Operator Request") return normalized;
+  const codes = Array.isArray(normalized.simulatorCodes)
+    ? normalized.simulatorCodes.filter(isStr)
+    : typeof normalized.simulatorCode === "string" && normalized.simulatorCode
+      ? [normalized.simulatorCode]
+      : [];
+  normalized.simulatorCodes = codes;
+  normalized.simulatorCode = codes[0] ?? "";
+  return normalized;
+}
 /**
  * Migrate a raw event record from legacy Inspection shapes to Surveillance:
  * - eventType "Inspection" → "Surveillance"
@@ -917,6 +1234,20 @@ function sanitizeOtherDutiesColor(
   return normalized;
 }
 
+function sanitizeOtherDutiesPresentation(
+  normalized: Record<string, unknown>,
+): Record<string, unknown> {
+  if (
+    normalized.eventType === "Other Duties" &&
+    typeof normalized.appendRemarkToCalendarPill !== "boolean"
+  ) {
+    // The field was added after existing rosters were created. Omission and
+    // malformed imported values both mean the legacy false behavior.
+    delete normalized.appendRemarkToCalendarPill;
+  }
+  return normalized;
+}
+
 export function parseEvents(
   raw: string | null,
   onCorrupt?: () => void,
@@ -943,7 +1274,13 @@ export function parseEvents(
         ) {
           normalized.operators = [normalized.operator];
         }
-        return sanitizeOtherDutiesColor(migrateSurveillanceRecord(normalized));
+        return sanitizeOtherDutiesPresentation(
+          sanitizeOtherDutiesColor(
+            normalizeSimulatorCodes(
+              migrateSurveillanceRecord(normalizeLegacyEventType(normalized)),
+            ),
+          ),
+        );
       }) as RosterEvent[];
   } catch {
     onCorrupt?.();
@@ -1001,13 +1338,19 @@ function sanitizeEvents(raw: unknown): RosterEvent[] | null {
     ) {
       normalized.operators = [normalized.operator];
     }
-    return sanitizeOtherDutiesColor(migrateSurveillanceRecord(normalized));
+    return sanitizeOtherDutiesPresentation(
+      sanitizeOtherDutiesColor(
+        normalizeSimulatorCodes(
+          migrateSurveillanceRecord(normalizeLegacyEventType(normalized)),
+        ),
+      ),
+    );
   }) as RosterEvent[];
 }
 
 function sanitizeInspectors(raw: unknown): Inspector[] | null {
   if (!Array.isArray(raw)) return null;
-  return raw
+  const inspectors = raw
     .filter(
       (i): i is Record<string, unknown> =>
         !!i && typeof i === "object" && isStr(i.name) && isStr(i.position),
@@ -1020,6 +1363,7 @@ function sanitizeInspectors(raw: unknown): Inspector[] | null {
         ? { email: (i as Record<string, unknown>).email as string }
         : {}),
     }));
+  return sortInspectorsByName(inspectors);
 }
 
 function sanitizeQualifications(raw: unknown): Qualifications | null {
@@ -1040,8 +1384,8 @@ function sanitizeSimulatorMap(raw: unknown): SimulatorMap | null {
   return out;
 }
 
-/** Validate operatorColors: only keeps entries with a valid #rrggbb hex value. */
-function sanitizeOperatorColors(raw: unknown): Record<string, string> | null {
+/** Validate a color map: only keeps entries with a valid #rrggbb hex value. */
+function sanitizeColorMap(raw: unknown): Record<string, string> | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
@@ -1087,7 +1431,8 @@ export function sanitizeSettingsState(
   const p = parsed as Record<string, unknown>;
 
   const operators = isStrArray(p.operators) ? p.operators : null;
-  const operatorColors = sanitizeOperatorColors(p.operatorColors);
+  const operatorColors = sanitizeColorMap(p.operatorColors);
+  const otherDutiesColors = sanitizeColorMap(p.otherDutiesColors);
   const simulatorActivities = isStrArray(p.simulatorActivities)
     ? p.simulatorActivities
     : null;
@@ -1113,6 +1458,7 @@ export function sanitizeSettingsState(
   return {
     ...(operators ? { operators } : {}),
     ...(operatorColors ? { operatorColors } : {}),
+    ...(otherDutiesColors ? { otherDutiesColors } : {}),
     ...(simulatorActivities ? { simulatorActivities } : {}),
     ...(surveillanceActivities ? { surveillanceActivities } : {}),
     ...(surveillanceQualifications ? { surveillanceQualifications } : {}),

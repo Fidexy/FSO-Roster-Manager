@@ -5,8 +5,15 @@ import {
   EventType,
   Inspector,
   Qualifications,
-  firstNameOf,
+  EventHistoryField,
+  EventHistoryValue,
+  EVENT_HISTORY_FIELDS,
+  EVENT_HISTORY_LABELS,
+  getEventFieldValue,
+  getEventPreviousValue,
+  hasEventFieldHistory,
   makeShortName,
+  sortInspectorsByName,
 } from "@/store/rosterStore";
 import {
   ChevronLeft,
@@ -155,34 +162,52 @@ function operatorPillStyle(hex: string): React.CSSProperties {
 }
 
 function shiftLabel(event: RosterEvent): string {
-  if (event.eventType !== "Leave" && event.eventType !== "Other Duties") return "";
+  if (event.eventType !== "Other Duties") return "";
   const s = event.startTime ?? "";
   const e = event.endTime ?? "";
-  const valid = /^([01]\d|2[0-3]):[0-5]\d$/;
-  if (!valid.test(s) || !valid.test(e)) return "";
+  if (!s && !e) return "";
   if (s === "00:00" && e === "23:59") return "";
-  if (e <= "12:00" && s < "12:00") return " (AM)";
-  if (s >= "12:00") return " (PM)";
-  return "";
+  if (event.otherDutiesShift) return ` (${event.otherDutiesShift})`;
+  return s && e ? ` ${s} – ${e}` : ` ${s || e}`;
 }
 
-function eventLabel(event: RosterEvent): string {
-  if (event.eventType === "Simulator")
-    return `${event.operator} ${event.simulatorCode}`;
+function leavePillTimeLabel(event: RosterEvent): string {
+  if (event.eventType !== "Leave") return "";
+  const s = event.startTime ?? "";
+  const e = event.endTime ?? "";
+  if (!s && !e) return "";
+  if (s === "00:00" && e === "23:59") return "";
+  if (event.leaveShift) return ` (${event.leaveShift})`;
+
+  return s && e ? ` ${s} – ${e}` : ` ${s || e}`;
+}
+
+function eventLabel(
+  event: RosterEvent,
+  shortName: (fullName: string) => string,
+): string {
+  if (event.eventType === "Operator Request")
+    return `${event.operator} ${event.simulatorCodes?.join(", ") ?? event.simulatorCode}`;
   if (event.eventType === "Surveillance")
     return `${event.operator} ${event.surveillanceTypes.join("/")}${event.details ? " " + event.details : ""}`;
   if (event.eventType === "Other Duties") {
     const ops = (event.operators ?? []).filter(o => o.toLowerCase() !== "n/a");
-    return (`${ops.join(", ")} ${event.subType}${shiftLabel(event)}`).trim();
+    const remark =
+      event.appendRemarkToCalendarPill === true && typeof event.remarks === "string"
+        ? event.remarks.trim()
+        : "";
+    return (
+      `${ops.join(", ")} ${event.subType}${remark ? ` ${remark}` : ""}${shiftLabel(event)}`
+    ).trim();
   }
   // Leave: first names only + leave type
-  const shortInspectors = event.inspectors.map(firstNameOf).join(", ");
-  return `${shortInspectors} ${event.leaveType}${shiftLabel(event)}`.trim();
+  const shortInspectors = event.inspectors.map(shortName).join(", ");
+  return `${shortInspectors} ${event.leaveType}${leavePillTimeLabel(event)}`.trim();
 }
 
 /**
  * Sort an event's inspector names so qualified inspectors appear first.
- * For Simulator events, "qualified" means the inspector's position is listed
+   * For Operator Request events, "qualified" means the inspector's position is listed
  * in qualifications[activity]. Order within each group is preserved.
  */
 function sortedInspectors(
@@ -191,7 +216,7 @@ function sortedInspectors(
   inspectors: Inspector[],
   qualifications: Qualifications,
 ): string[] {
-  if (event.eventType !== "Simulator") return names;
+  if (event.eventType !== "Operator Request") return names;
   const qualifiedPositions = new Set(qualifications[event.activity] ?? []);
   const positionOf = new Map(inspectors.map((i) => [i.name, i.position]));
   const isQualified = (name: string) =>
@@ -203,25 +228,142 @@ function sortedInspectors(
   });
 }
 
-function EventTooltip({
+function tooltipValue(
+  field: EventHistoryField,
+  value: EventHistoryValue,
+  shortName?: (name: string) => string,
+): string {
+  if (value === null) return "Not set";
+  if (Array.isArray(value)) {
+    const names = field === "inspectors" && shortName
+      ? value.map(shortName)
+      : value;
+    return names.join(", ") || "None";
+  }
+  if (field === "date") {
+    const [year, month, day] = value.split("-");
+    return year && month && day ? `${day}-${month}-${year}` : value;
+  }
+  return value;
+}
+
+function HistoryFieldRow({
+  event,
+  field,
+  shortName,
+  onClearHistory,
+  formatValue,
+}: {
+  event: RosterEvent;
+  field: EventHistoryField;
+  shortName?: (name: string) => string;
+  onClearHistory: (id: string, field: EventHistoryField) => void;
+  formatValue?: (value: EventHistoryValue) => string;
+}) {
+  const current = getEventFieldValue(event, field);
+  const previous = getEventPreviousValue(event, field);
+  const changed = hasEventFieldHistory(event, field);
+  if (current === null && !changed) return null;
+  const format = (value: EventHistoryValue) =>
+    formatValue ? formatValue(value) : tooltipValue(field, value, shortName);
+
+  return (
+    <div
+      className={`${
+        changed
+          ? "-mx-1 rounded bg-amber-50 px-1 dark:bg-amber-950/30"
+          : ""
+      }`}
+    >
+      <div>
+        <span className="text-muted-foreground">
+          {EVENT_HISTORY_LABELS[field]}:{" "}
+        </span>
+        {format(current)}
+      </div>
+      {changed && (
+        <div className="mt-0.5 flex items-center gap-1 text-[10px] text-muted-foreground/50">
+          <span className="line-through">{format(previous.value)}</span>
+          <button
+            type="button"
+            className="pointer-events-auto rounded p-0.5 text-muted-foreground/60 hover:bg-destructive/10 hover:text-destructive"
+            aria-label={`Clear ${EVENT_HISTORY_LABELS[field].toLowerCase()} edit history`}
+            title={`Clear ${EVENT_HISTORY_LABELS[field].toLowerCase()} edit history`}
+            onClick={(e) => {
+              e.stopPropagation();
+              onClearHistory(event.id, field);
+            }}
+          >
+            <X className="h-2.5 w-2.5" />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function EventTooltip({
   event,
   x,
   y,
   inspectors,
   qualifications,
+  onClearHistory,
+  onMouseEnter,
+  onMouseLeave,
 }: {
   event: RosterEvent;
   x: number;
   y: number;
   inspectors: Inspector[];
   qualifications: Qualifications;
+  onClearHistory: (
+    id: string,
+    field: EventHistoryField | "inspectors" | "time",
+  ) => void;
+  onMouseEnter: () => void;
+  onMouseLeave: () => void;
 }) {
   // Keep card on screen: flip left if near right edge, flip up if near bottom
   const flipLeft = x > window.innerWidth - 220;
   const flipUp = y > window.innerHeight - 160;
+  const shortName = makeShortName(inspectors);
+  const previousStart = getEventPreviousValue(event, "startTime");
+  const previousEnd = getEventPreviousValue(event, "endTime");
+  const hasPreviousTime =
+    hasEventFieldHistory(event, "startTime") ||
+    hasEventFieldHistory(event, "endTime");
+  const previousEventType = getEventPreviousValue(event, "eventType");
+  const hasPreviousEventType = hasEventFieldHistory(event, "eventType");
+  const previousInspectors = getEventPreviousValue(event, "inspectors");
+  const hasPreviousInspectors = hasEventFieldHistory(event, "inspectors");
+  const shownFields = new Set<EventHistoryField>([
+    "date",
+    "eventType",
+    "startTime",
+    "endTime",
+    "inspectors",
+  ]);
+  if (event.eventType === "Operator Request") {
+    ["operator", "simulatorCodes", "aircraftType", "activity", "candidateName"].forEach(
+      (field) => shownFields.add(field as EventHistoryField),
+    );
+  } else if (event.eventType === "Surveillance") {
+    ["operator", "surveillanceTypes", "details"].forEach((field) =>
+      shownFields.add(field as EventHistoryField),
+    );
+  } else if (event.eventType === "Other Duties") {
+    ["operators", "subType", "otherDutiesShift", "customColor", "remarks"].forEach(
+      (field) => shownFields.add(field as EventHistoryField),
+    );
+  } else {
+    ["leaveType", "leaveShift"].forEach((field) =>
+      shownFields.add(field as EventHistoryField),
+    );
+  }
 
   const typeColor: Record<EventType, string> = {
-    Simulator: "bg-blue-100 text-blue-700",
+    "Operator Request": "bg-blue-100 text-blue-700",
     Surveillance: "bg-amber-100 text-amber-700",
     "Other Duties": "bg-purple-100 text-purple-700",
     Leave: "bg-gray-600 text-white",
@@ -229,7 +371,9 @@ function EventTooltip({
 
   return (
     <div
-      className="fixed z-50 pointer-events-none"
+      className="fixed z-50 pointer-events-auto"
+      onMouseEnter={onMouseEnter}
+      onMouseLeave={onMouseLeave}
       style={{
         left: flipLeft ? x - 12 : x + 12,
         top: flipUp ? y - 8 : y + 8,
@@ -238,91 +382,198 @@ function EventTooltip({
     >
       <div className="w-52 rounded-lg border border-border bg-card shadow-lg p-3 text-xs flex flex-col gap-1.5">
         {/* Header */}
-        <div className="flex items-center justify-between gap-2">
+        <div
+          className={`flex items-center justify-between gap-2${
+            hasPreviousTime
+              ? " -mx-1 rounded bg-amber-50 px-1 py-0.5 dark:bg-amber-950/30"
+              : ""
+          }`}
+        >
           <span
             className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${typeColor[event.eventType]}`}
           >
             {event.eventType}
           </span>
-          <span className="tabular-nums text-muted-foreground">
-            {event.startTime}–{event.endTime}
+          <span className="flex flex-col items-end tabular-nums text-muted-foreground">
+            <span>{event.startTime}–{event.endTime}</span>
+            {hasPreviousTime && (
+              <span className="mt-0.5 flex items-center gap-1 text-[10px] text-muted-foreground/50">
+                <span className="line-through">
+                  {tooltipValue("startTime", previousStart.value)}–
+                  {tooltipValue("endTime", previousEnd.value)}
+                </span>
+                <button
+                  type="button"
+                  className="pointer-events-auto rounded p-0.5 text-muted-foreground/60 hover:bg-destructive/10 hover:text-destructive"
+                  aria-label="Clear previous start time"
+                  title="Clear previous start time"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onClearHistory(event.id, "startTime");
+                  }}
+                >
+                  <X className="h-2.5 w-2.5" />
+                </button>
+                <button
+                  type="button"
+                  className="pointer-events-auto rounded p-0.5 text-muted-foreground/60 hover:bg-destructive/10 hover:text-destructive"
+                  aria-label="Clear previous end time"
+                  title="Clear previous end time"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onClearHistory(event.id, "endTime");
+                  }}
+                >
+                  <X className="h-2.5 w-2.5" />
+                </button>
+              </span>
+            )}
           </span>
         </div>
 
+        <HistoryFieldRow
+          event={event}
+          field="date"
+          onClearHistory={onClearHistory}
+        />
+        {hasPreviousEventType && (
+          <div className="flex items-center gap-1 text-[10px] text-muted-foreground/50">
+            <span>
+              Previous {EVENT_HISTORY_LABELS.eventType.toLowerCase()}:{" "}
+              <span className="line-through">
+                {tooltipValue("eventType", previousEventType.value)}
+              </span>
+            </span>
+            <button
+              type="button"
+              className="pointer-events-auto rounded p-0.5 text-muted-foreground/60 hover:bg-destructive/10 hover:text-destructive"
+              aria-label="Clear event type edit history"
+              title="Clear event type edit history"
+              onClick={(e) => {
+                e.stopPropagation();
+                onClearHistory(event.id, "eventType");
+              }}
+            >
+              <X className="h-2.5 w-2.5" />
+            </button>
+          </div>
+        )}
+
         {/* Type-specific fields */}
-        {event.eventType === "Simulator" && (
+        {event.eventType === "Operator Request" && (
           <>
-            <div>
-              <span className="text-muted-foreground">Code: </span>
-              {event.simulatorCode} · {event.aircraftType}
-            </div>
-            <div>
-              <span className="text-muted-foreground">Activity: </span>
-              {event.activity}
-            </div>
-            <div>
-              <span className="text-muted-foreground">Operator: </span>
-              {event.operator}
-            </div>
-            <div>
-              <span className="text-muted-foreground">Candidate: </span>
-              {event.candidateName}
-            </div>
+            <HistoryFieldRow
+              event={event}
+              field="simulatorCodes"
+              onClearHistory={onClearHistory}
+            />
+            <HistoryFieldRow
+              event={event}
+              field="aircraftType"
+              onClearHistory={onClearHistory}
+            />
+            <HistoryFieldRow
+              event={event}
+              field="activity"
+              onClearHistory={onClearHistory}
+            />
+            <HistoryFieldRow
+              event={event}
+              field="operator"
+              onClearHistory={onClearHistory}
+            />
+            <HistoryFieldRow
+              event={event}
+              field="candidateName"
+              onClearHistory={onClearHistory}
+            />
           </>
         )}
         {event.eventType === "Surveillance" && (
           <>
-            <div>
-              <span className="text-muted-foreground">Operator: </span>
-              {event.operator}
-            </div>
-            <div>
-              <span className="text-muted-foreground">
-                {event.surveillanceTypes.length > 1 ? "Types: " : "Type: "}
-              </span>
-              {event.surveillanceTypes.join(", ")}
-            </div>
-            {event.details && (
-              <div>
-                <span className="text-muted-foreground">Details: </span>
-                {event.details}
-              </div>
-            )}
+            <HistoryFieldRow
+              event={event}
+              field="operator"
+              onClearHistory={onClearHistory}
+            />
+            <HistoryFieldRow
+              event={event}
+              field="surveillanceTypes"
+              onClearHistory={onClearHistory}
+            />
+            <HistoryFieldRow
+              event={event}
+              field="details"
+              onClearHistory={onClearHistory}
+            />
           </>
         )}
         {event.eventType === "Other Duties" && (
           <>
-            {(() => {
-              const ops = (event.operators ?? []).filter(o => o.toLowerCase() !== "n/a");
-              return ops.length > 0 ? (
-                <div>
-                  <span className="text-muted-foreground">Operator: </span>
-                  {ops.join(", ")}
-                </div>
-              ) : null;
-            })()}
-            <div>
-              <span className="text-muted-foreground">Type: </span>
-              {event.subType}
-            </div>
-            {event.remarks && (
-              <div>
-                <span className="text-muted-foreground">Remarks: </span>
-                {event.remarks}
-              </div>
-            )}
+            <HistoryFieldRow
+              event={event}
+              field="operators"
+              onClearHistory={onClearHistory}
+              formatValue={(value) =>
+                tooltipValue(
+                  "operators",
+                  Array.isArray(value)
+                    ? value.filter((operator) => operator.toLowerCase() !== "n/a")
+                    : value,
+                )
+              }
+            />
+            <HistoryFieldRow
+              event={event}
+              field="subType"
+              onClearHistory={onClearHistory}
+            />
+            <HistoryFieldRow
+              event={event}
+              field="otherDutiesShift"
+              onClearHistory={onClearHistory}
+            />
+            <HistoryFieldRow
+              event={event}
+              field="customColor"
+              onClearHistory={onClearHistory}
+            />
+            <HistoryFieldRow
+              event={event}
+              field="remarks"
+              onClearHistory={onClearHistory}
+            />
           </>
         )}
         {event.eventType === "Leave" && (
-          <div>
-            <span className="text-muted-foreground">Leave: </span>
-            {event.leaveType}
-          </div>
+          <>
+            <HistoryFieldRow
+              event={event}
+              field="leaveType"
+              onClearHistory={onClearHistory}
+            />
+            <HistoryFieldRow
+              event={event}
+              field="leaveShift"
+              onClearHistory={onClearHistory}
+            />
+          </>
         )}
 
-        {/* Inspectors — qualified first for Simulator events */}
+        {EVENT_HISTORY_FIELDS.filter(
+          (field) => !shownFields.has(field) && hasEventFieldHistory(event, field),
+        ).map((field) => (
+          <HistoryFieldRow
+            key={field}
+            event={event}
+            field={field}
+            onClearHistory={onClearHistory}
+          />
+        ))}
+
+        {/* Inspectors — qualified first for Operator Request events */}
         <div
-          className={`pt-0.5 border-t border-border${event.previousInspectors ? " -mx-1 px-1 rounded bg-amber-50 dark:bg-amber-950/30" : ""}`}
+          className={`pt-0.5 border-t border-border${hasPreviousInspectors ? " -mx-1 px-1 rounded bg-amber-50 dark:bg-amber-950/30" : ""}`}
         >
           <div className="text-muted-foreground">
             {sortedInspectors(
@@ -331,12 +582,26 @@ function EventTooltip({
               inspectors,
               qualifications,
             )
-              .map(firstNameOf)
+              .map(shortName)
               .join(", ")}
           </div>
-          {event.previousInspectors && (
-            <div className="line-through text-muted-foreground/50 text-[10px] mt-0.5">
-              {event.previousInspectors.map(firstNameOf).join(", ")}
+          {hasPreviousInspectors && (
+            <div className="mt-0.5 flex items-center gap-1 text-[10px] text-muted-foreground/50">
+              <span className="line-through">
+                {tooltipValue("inspectors", previousInspectors.value, shortName)}
+              </span>
+              <button
+                type="button"
+                className="pointer-events-auto rounded p-0.5 text-muted-foreground/60 hover:bg-destructive/10 hover:text-destructive"
+                aria-label="Clear inspector edit history"
+                title="Clear inspector edit history"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onClearHistory(event.id, "inspectors");
+                }}
+              >
+                <X className="h-2.5 w-2.5" />
+              </button>
             </div>
           )}
         </div>
@@ -348,6 +613,7 @@ function EventTooltip({
 function CalendarEvent({
   event,
   operatorColor,
+  shortName,
   onEdit,
   isEditing,
   hasPendingEdit,
@@ -356,6 +622,7 @@ function CalendarEvent({
 }: {
   event: RosterEvent;
   operatorColor?: string;
+  shortName: (fullName: string) => string;
   onEdit: (id: string) => void;
   isEditing: boolean;
   hasPendingEdit: boolean;
@@ -394,7 +661,9 @@ function CalendarEvent({
         ${hasPendingEdit ? "opacity-60" : ""}`}
     >
       <div className="flex items-baseline gap-1 min-w-0">
-        <span className="truncate min-w-0 flex-1">{eventLabel(event)}</span>
+        <span className="truncate min-w-0 flex-1">
+          {eventLabel(event, shortName)}
+        </span>
         {hasPendingEdit && (
           <span
             title="Edit staged — pending commit"
@@ -410,6 +679,7 @@ function CalendarEvent({
 
 export default function CalendarGrid({
   onDateSelect,
+  selectedDate,
   year: controlledYear,
   month: controlledMonth,
   onMonthChange,
@@ -419,6 +689,8 @@ export default function CalendarGrid({
   onFilterInspectorsChange,
 }: {
   onDateSelect?: (date: string) => void;
+  /** Date currently used by the entry form and staging queue. */
+  selectedDate?: string;
   /** Optional controlled month view (1-based month). */
   year?: number;
   month?: number;
@@ -428,12 +700,13 @@ export default function CalendarGrid({
   onFilterOperatorsChange: (next: Set<string>) => void;
   onFilterInspectorsChange: (next: Set<string>) => void;
 }) {
-  const { state, setEditingEventId } = useRosterStore();
+  const { state, setEditingEventId, clearEventHistory } = useRosterStore();
   const {
     editingEventId,
     calendarEvents,
     stagingQueue,
     operatorColors,
+    otherDutiesColors,
     operators,
     inspectors,
     qualifications,
@@ -466,7 +739,7 @@ export default function CalendarGrid({
       }
     }
     if (filterInspectors.size > 0) {
-      if (!e.inspectors.some((i) => filterInspectors.has(firstNameOf(i))))
+      if (!e.inspectors.some((i) => filterInspectors.has(i)))
         return false;
     }
     return true;
@@ -490,6 +763,19 @@ export default function CalendarGrid({
   const handleMouseLeave = useCallback(() => {
     hideTimer.current = setTimeout(() => setTooltip(null), 80);
   }, []);
+  const handleTooltipMouseEnter = useCallback(() => {
+    if (hideTimer.current) clearTimeout(hideTimer.current);
+  }, []);
+  const handleClearHistory = useCallback(
+    (
+      id: string,
+      kind: EventHistoryField | "inspectors" | "time",
+    ) => {
+      clearEventHistory(id, kind);
+      setTooltip(null);
+    },
+    [clearEventHistory],
+  );
 
   const now = new Date();
   const [internalYear, setYear] = useState(now.getFullYear());
@@ -528,7 +814,7 @@ export default function CalendarGrid({
     // Simulator first, then Surveillance, then Other Duties. Flying remains
     // directly above Leave to preserve the existing Flying > Leave priority.
     const sortTier = (e: RosterEvent) =>
-      e.eventType === "Simulator"
+      e.eventType === "Operator Request"
         ? 0
         : e.eventType === "Surveillance"
           ? 1
@@ -553,8 +839,8 @@ export default function CalendarGrid({
   const anyFilterActive = filterOperators.size > 0 || filterInspectors.size > 0;
 
   const shortName = makeShortName(inspectors);
-  const inspectorOptions = inspectors.map((i) => ({
-    value: firstNameOf(i.name),
+  const inspectorOptions = sortInspectorsByName(inspectors).map((i) => ({
+    value: i.name,
     label: shortName(i.name),
   }));
 
@@ -562,6 +848,8 @@ export default function CalendarGrid({
     ...Array.from({ length: firstDayOffset }, () => null),
     ...Array.from({ length: daysInMonth }, (_, i) => i + 1),
   ];
+  const today = new Date();
+  const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 
   return (
     <section className="h-full flex flex-col bg-background overflow-hidden">
@@ -652,18 +940,29 @@ export default function CalendarGrid({
               const holidayName = holidays.get(dateKey);
               const isHoliday = !!holidayName;
               const isShaded = isWeekend || isHoliday;
+              const isToday = dateKey === todayKey;
+              const isSelected = dateKey === selectedDate;
               const dayEvents = eventsByDate.get(dateKey) ?? [];
               return (
                 <div
                   key={day}
                   onClick={() => onDateSelect?.(dateKey)}
-                  className={`min-h-32 p-1.5 flex flex-col cursor-pointer hover:bg-primary/5 transition-colors group ${isShaded ? "bg-muted" : "bg-card"}`}
+                  aria-label={`${dateKey}${isToday ? " (today)" : ""}${isSelected ? " (selected)" : ""}`}
+                  aria-current={isToday ? "date" : undefined}
+                  aria-selected={isSelected}
+                  className={`min-h-32 p-1.5 flex flex-col cursor-pointer hover:bg-primary/5 transition-colors group ${
+                    isShaded ? "bg-muted" : "bg-card"
+                  } ${
+                    isSelected ? "ring-2 ring-primary ring-inset" : ""
+                  }`}
                 >
                   <span
                     className={`self-end mb-1 tabular-nums text-xs ${
-                      dayEvents.length > 0
-                        ? "font-semibold text-foreground"
-                        : "text-muted-foreground"
+                      isToday
+                        ? "rounded-full min-w-6 h-6 px-1 flex items-center justify-center font-bold bg-primary text-primary-foreground"
+                        : dayEvents.length > 0
+                          ? "font-semibold text-foreground"
+                          : "text-muted-foreground"
                     }`}
                   >
                     {day}
@@ -671,20 +970,28 @@ export default function CalendarGrid({
                   <div className="flex flex-col gap-1">
                     <AnimatePresence>
                       {dayEvents.map((event) => {
-                        const opColor =
-                          event.eventType === "Simulator" ||
+                        const eventColor =
+                          event.eventType === "Operator Request" ||
                           event.eventType === "Surveillance"
                             ? operatorColors[event.operator]
                             : event.eventType === "Other Duties"
-                              ? /^#[0-9a-f]{6}$/i.test(event.customColor ?? "")
-                                ? event.customColor
-                                : operatorColors[event.operators?.[0] ?? ""]
+                              ? (() => {
+                                  const operatorColor = (event.operators ?? [])
+                                    .map((operator) => operatorColors[operator])
+                                    .find(Boolean);
+                                  if (operatorColor) return operatorColor;
+                                  if (/^#[0-9a-f]{6}$/i.test(event.customColor ?? "")) {
+                                    return event.customColor;
+                                  }
+                                  return otherDutiesColors[event.subType];
+                                })()
                               : undefined;
                         return (
                           <CalendarEvent
                             key={event.id}
                             event={event}
-                            operatorColor={opColor}
+                            operatorColor={eventColor}
+                            shortName={shortName}
                             onEdit={setEditingEventId}
                             isEditing={editingEventId === event.id}
                             hasPendingEdit={pendingEditIds.has(event.id)}
@@ -723,6 +1030,9 @@ export default function CalendarGrid({
               y={tooltip.y}
               inspectors={inspectors}
               qualifications={qualifications}
+              onClearHistory={handleClearHistory}
+              onMouseEnter={handleTooltipMouseEnter}
+              onMouseLeave={handleMouseLeave}
             />
           </motion.div>
         )}

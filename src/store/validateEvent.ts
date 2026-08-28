@@ -2,7 +2,7 @@
 
 import {
   RosterEvent,
-  SimulatorEvent,
+  OperatorRequestEvent,
   SurveillanceEvent,
   LeaveEvent,
   OtherDutiesEvent,
@@ -20,7 +20,7 @@ export type ValidationResult =
  * Typed as a discriminated union so TypeScript can narrow on `eventType`.
  */
 export type EventInput =
-  | (Omit<SimulatorEvent,    'id'> & { id?: string })
+  | (Omit<OperatorRequestEvent, 'id'> & { id?: string })
   | (Omit<SurveillanceEvent, 'id'> & { id?: string })
   | (Omit<LeaveEvent,        'id'> & { id?: string })
   | (Omit<OtherDutiesEvent,  'id'> & { id?: string });
@@ -29,14 +29,14 @@ export type EventInput =
  * Runs three ordered checks against an event:
  *  1. Start time must be before end time.
  *  2. No assigned inspector may already appear on a calendar event on the same date.
- *  3. (Simulator only) At least one assigned inspector must hold a qualified
+   *  3. (Operator Request only) At least one assigned inspector must hold a qualified
  *     position for configured activities. Custom activities intentionally
  *     bypass that mapping requirement.
  *
  * @param event           The event to validate.
  * @param calendarEvents  Current committed calendar events.
  * @param inspectors      Inspector roster (for position look-ups).
- * @param qualifications  Simulator activity → allowed positions map.
+ * @param qualifications  Operator Request activity → allowed positions map.
  * @param excludeId       When editing an existing event, pass its id to exclude it
  *                        from the double-booking check.
  * @param excludeSourceIds Set of calendar event ids that are the source of any
@@ -58,8 +58,8 @@ export function validateEvent(
   // ── Check 0: Required fields ─────────────────────────────────────────────
   const missing: string[] = [];
   if (!event.date)      missing.push('date');
-  if (event.eventType === 'Simulator') {
-    const e = event as SimulatorEvent;
+  if (event.eventType === 'Operator Request') {
+    const e = event as OperatorRequestEvent;
     if (!e.operator)      missing.push('operator');
     if (!e.activity)      missing.push('activity');
   } else if (event.eventType === 'Surveillance') {
@@ -103,8 +103,8 @@ export function validateEvent(
     }
   }
 
-  // ── Check 3: Qualifications (Simulator only) ─────────────────────────────
-  if (event.eventType === 'Simulator') {
+  // ── Check 3: Qualifications (Operator Request only) ──────────────────────
+  if (event.eventType === 'Operator Request') {
     if (event.inspectors.length === 0) {
       return { isValid: false, error: 'No inspectors listed.' };
     }

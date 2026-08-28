@@ -1,5 +1,18 @@
-import { firstNameOf, type RosterEvent } from "@/store/rosterStore";
-import type { ChangelogEntry, ChangelogHistoryVersion } from "@/utils/exportDiff";
+import {
+  makeShortName,
+  type EventHistoryField,
+  type EventHistoryValue,
+  type RosterEvent,
+  EVENT_HISTORY_FIELDS,
+  EVENT_HISTORY_LABELS,
+  getEventPreviousValue,
+  hasEventFieldHistory,
+} from "@/store/rosterStore";
+import {
+  computeChangelog,
+  type ChangelogEntry,
+  type ChangelogHistoryVersion,
+} from "@/utils/exportDiff";
 
 const MONTH_NAMES = [
   "January",
@@ -59,43 +72,59 @@ function htmlPillStyle(hex: string | undefined): string {
 function htmlOpColor(
   ev: RosterEvent,
   operatorColors: Record<string, string>,
+  otherDutiesColors: Record<string, string>,
 ): string | undefined {
   const ea = ev as Record<string, unknown>;
-  if (ev.eventType === "Simulator" || ev.eventType === "Surveillance")
+  if (ev.eventType === "Operator Request" || ev.eventType === "Surveillance")
     return operatorColors[ea.operator as string];
-  if (ev.eventType === "Other Duties")
-    return (
-      (typeof ea.customColor === "string" &&
+  if (ev.eventType === "Other Duties") {
+    const operators = (ea.operators as string[]) ?? [];
+    const operatorColor = operators
+      .map((operator) => operatorColors[operator])
+      .find(Boolean);
+    if (operatorColor) return operatorColor;
+    if (
+      typeof ea.customColor === "string" &&
       /^#[0-9a-f]{6}$/i.test(ea.customColor)
-        ? ea.customColor
-        : undefined) ??
-      operatorColors[((ea.operators as string[]) ?? [])[0]]
-    );
+    ) {
+      return ea.customColor;
+    }
+    return otherDutiesColors[ev.subType];
+  }
   return undefined;
 }
 
 /**
- * Returns "AM", "PM", or "" for a Leave or Other Duties event based on its stored times.
- * AM ends at or before 12:00; PM starts at or after 12:00.
- * All-day (00:00–23:59) returns "".
+ * Returns a Leave pill suffix based only on an explicit shortcut selection.
+ * Other timed leave shows its time, while full-day leave returns "".
  */
 function leaveShiftLabel(ev: RosterEvent): string {
-  if (ev.eventType !== "Leave" && ev.eventType !== "Other Duties") return "";
+  if (ev.eventType !== "Leave") return "";
   const s = ev.startTime ?? "";
   const e = ev.endTime ?? "";
-  // Only trust well-formed zero-padded HH:MM values (imported data may be
-  // empty or non-padded, where lexical comparison misclassifies).
-  const valid = /^([01]\d|2[0-3]):[0-5]\d$/;
-  if (!valid.test(s) || !valid.test(e)) return "";
+  if (!s && !e) return "";
   if (s === "00:00" && e === "23:59") return "";
-  if (e <= "12:00" && s < "12:00") return "AM";
-  if (s >= "12:00") return "PM";
+  if (ev.leaveShift) return `(${ev.leaveShift})`;
+
+  return s && e ? `${s} – ${e}` : s || e;
+}
+
+function otherDutiesShiftLabel(ev: RosterEvent): string {
+  if (ev.eventType !== "Other Duties") return "";
+  const s = ev.startTime ?? "";
+  const e = ev.endTime ?? "";
+  if (!s && !e) return "";
+  if (s === "00:00" && e === "23:59") return "";
+  if (ev.otherDutiesShift) return ev.otherDutiesShift;
   return "";
 }
 
-function htmlEventLabel(ev: RosterEvent): string {
+function htmlEventLabel(
+  ev: RosterEvent,
+  shortName: (fullName: string) => string,
+): string {
   const ea = ev as Record<string, unknown>;
-  if (ev.eventType === "Simulator") return `${ea.operator} ${ea.simulatorCode}`;
+  if (ev.eventType === "Operator Request") return `${ea.operator} ${((ea.simulatorCodes as string[]) ?? [ea.simulatorCode as string]).join(", ")}`;
   if (ev.eventType === "Surveillance") {
     const types = ((ea.surveillanceTypes as string[]) ?? []).join("/");
     const details = (ea.details as string) ?? "";
@@ -104,21 +133,24 @@ function htmlEventLabel(ev: RosterEvent): string {
   if (ev.eventType === "Other Duties")
     return `${((ea.operators as string[]) ?? []).join(", ")} ${ea.subType}`.trim();
   const shift = leaveShiftLabel(ev);
-  return `${(ev.inspectors ?? []).map(firstNameOf).join(", ")} ${ea.leaveType}${shift ? " " + shift : ""}`.trim();
+  return `${(ev.inspectors ?? []).map(shortName).join(", ")} ${ea.leaveType}${shift ? " " + shift : ""}`.trim();
 }
 
 /** Builds the inner HTML for a calendar pill — single line. */
-function htmlPillContent(ev: RosterEvent): string {
+function htmlPillContent(
+  ev: RosterEvent,
+  shortName: (fullName: string) => string,
+): string {
   const ea = ev as Record<string, unknown>;
 
   if (ev.eventType === "Leave") {
-    const names = (ev.inspectors ?? []).map(firstNameOf).join(", ");
+    const names = (ev.inspectors ?? []).map(shortName).join(", ");
     const shift = leaveShiftLabel(ev);
     const label = `${(ea.leaveType as string) ?? ""}${shift ? " " + shift : ""}`;
     return `<span class="pl">${esc(names)} ${esc(label)}</span>`;
   }
 
-  const names = (ev.inspectors ?? []).map(firstNameOf).join(", ");
+  const names = (ev.inspectors ?? []).map(shortName).join(", ");
 
   let op = "";
   if (ev.eventType === "Other Duties") {
@@ -130,21 +162,30 @@ function htmlPillContent(ev: RosterEvent): string {
   }
 
   let detail = "";
-  if (ev.eventType === "Simulator") {
+  if (ev.eventType === "Operator Request") {
     detail = (ea.activity as string) ?? "";
   } else if (ev.eventType === "Surveillance") {
-    detail = `${((ea.surveillanceTypes as string[]) ?? []).join(", ")} surveillance`;
+    const types = ((ea.surveillanceTypes as string[]) ?? []).join(", ");
+    const details = (ea.details as string) ?? "";
+    detail = `${types} surveillance${details ? ` ${details}` : ""}`;
   } else if (ev.eventType === "Other Duties") {
     detail = (ea.subType as string) ?? "";
   }
 
   const s = ev.startTime ?? "";
   const e = ev.endTime ?? "";
-  const shift = ev.eventType === "Other Duties" ? leaveShiftLabel(ev) : "";
+  const shift =
+    ev.eventType === "Other Duties" ? otherDutiesShiftLabel(ev) : "";
   const time =
     !shift && s && !(s === "00:00" && e === "23:59") ? `${s} – ${e}` : "";
 
-  const label = [names, op, detail, shift ? `(${shift})` : time]
+  const remark =
+    ev.eventType === "Other Duties" &&
+    ev.appendRemarkToCalendarPill === true &&
+    typeof ev.remarks === "string"
+      ? ev.remarks.trim()
+      : "";
+  const label = [names, op, detail, remark, shift ? `(${shift})` : time]
     .filter(Boolean)
     .join(" ");
   return `<span class="pl">${esc(label)}</span>`;
@@ -156,12 +197,19 @@ function htmlPillContent(ev: RosterEvent): string {
  * rendered with strikethrough and added names are coloured green.
  * Both the static (no-JS) pre-render and the live table use this function.
  */
-function htmlInspDiff(ev: RosterEvent): string {
-  const curr = (ev.inspectors ?? []).map(firstNameOf);
-  const prev = ev.previousInspectors?.map(firstNameOf) ?? null;
+function htmlInspDiff(
+  ev: RosterEvent,
+  shortName: (fullName: string) => string,
+): string {
+  const curr = (ev.inspectors ?? []).map(shortName);
+  const previous = getEventPreviousValue(ev, "inspectors");
+  const prev = Array.isArray(previous.value)
+    ? previous.value.map(shortName)
+    : [];
 
   // No diff recorded — plain text
-  if (!prev) return esc(curr.join(", "));
+  if (!previous.hasPrevious || !hasEventFieldHistory(ev, "inspectors"))
+    return esc(curr.join(", "));
 
   // Diff recorded but no actual change — plain text
   const currSorted = [...curr].sort().join("\0");
@@ -195,8 +243,57 @@ function htmlInspDiff(ev: RosterEvent): string {
   return parts.join(" ");
 }
 
+function hasPreviousTime(ev: RosterEvent): boolean {
+  return (
+    hasEventFieldHistory(ev, "startTime") ||
+    hasEventFieldHistory(ev, "endTime")
+  );
+}
+
+/** Produces the time cell with the previous range struck through when changed. */
+function htmlTimeDiff(ev: RosterEvent): string {
+  const current = `${esc(ev.startTime)} &ndash; ${esc(ev.endTime)}`;
+  if (!hasPreviousTime(ev)) return current;
+  const previousStart = getEventPreviousValue(ev, "startTime").value;
+  const previousEnd = getEventPreviousValue(ev, "endTime").value;
+  const previous = `${esc(previousStart)} &ndash; ${esc(previousEnd)}`;
+  return (
+    `<span class="td-time-current">${current}</span>` +
+    `<br><s class="td-time-old">${previous}</s>`
+  );
+}
+
+function htmlHistoryValue(
+  field: EventHistoryField,
+  value: EventHistoryValue,
+): string {
+  if (value === null) return "Not set";
+  if (Array.isArray(value)) return value.join(", ") || "None";
+  if (field === "date") {
+    const [year, month, day] = value.split("-");
+    return year && month && day ? `${day}-${month}-${year}` : value;
+  }
+  return value;
+}
+
+/** Static table history for fields that do not have dedicated table columns. */
+function htmlPreviousFieldSummary(ev: RosterEvent): string {
+  const rows = EVENT_HISTORY_FIELDS.filter(
+    (field) =>
+      field !== "inspectors" && field !== "startTime" && field !== "endTime",
+  )
+    .filter((field) => hasEventFieldHistory(ev, field))
+    .map((field) => {
+      const previous = getEventPreviousValue(ev, field).value;
+      return `<div class="td-history"><s>${esc(EVENT_HISTORY_LABELS[field])}: ${esc(
+        htmlHistoryValue(field, previous),
+      )}</s></div>`;
+    });
+  return rows.join("");
+}
+
 function htmlSortTier(ev: RosterEvent): number {
-  if (ev.eventType === "Simulator") return 0;
+  if (ev.eventType === "Operator Request") return 0;
   if (ev.eventType === "Surveillance") return 1;
   if (
     ev.eventType === "Other Duties" &&
@@ -211,6 +308,8 @@ function htmlSortTier(ev: RosterEvent): number {
 function tsRenderGrid(
   monthEvents: RosterEvent[],
   operatorColors: Record<string, string>,
+  otherDutiesColors: Record<string, string>,
+  shortName: (fullName: string) => string,
   year: number,
   month: number,
   monthStr: string,
@@ -256,7 +355,7 @@ function tsRenderGrid(
     h += '<div class="pills">';
     for (const ev of dayEvs) {
       const isLeave = ev.eventType === "Leave";
-      const oc = htmlOpColor(ev, operatorColors);
+       const oc = htmlOpColor(ev, operatorColors, otherDutiesColors);
       const st = isLeave
         ? ""
         : oc
@@ -264,7 +363,7 @@ function tsRenderGrid(
           : "background:#e5e7eb;border-color:#d1d5db;color:#374151;";
       h +=
         `<div class="pill${isLeave ? " lp" : ""}" style="${st}" data-id="${esc(ev.id)}">` +
-        htmlPillContent(ev) +
+        htmlPillContent(ev, shortName) +
         `</div>`;
     }
     h += "</div></div>";
@@ -277,6 +376,8 @@ function tsRenderGrid(
 function tsRenderTable(
   monthEvents: RosterEvent[],
   operatorColors: Record<string, string>,
+  otherDutiesColors: Record<string, string>,
+  shortName: (fullName: string) => string,
   year: number,
   month: number,
   monthStr: string,
@@ -329,13 +430,13 @@ function tsRenderTable(
 
       for (const ev of dayEvs) {
         const ea = ev as Record<string, unknown>;
-        const oc2 = htmlOpColor(ev, operatorColors);
+        const oc2 = htmlOpColor(ev, operatorColors, otherDutiesColors);
 
         let duty = "";
         let det = "";
-        if (ev.eventType === "Simulator") {
+        if (ev.eventType === "Operator Request") {
           duty = `${esc(ea.operator as string)} &middot; ${esc(ea.activity as string)}`;
-          const codeType = `${esc(ea.simulatorCode as string)} / ${esc(ea.aircraftType as string)}`;
+          const codeType = `${esc(((ea.simulatorCodes as string[]) ?? [ea.simulatorCode as string]).join(", "))} / ${esc(ea.aircraftType as string)}`;
           const candidate = (ea.candidateName as string) ?? "";
           det = candidate ? `${codeType} &middot; ${esc(candidate)}` : codeType;
         } else if (ev.eventType === "Surveillance") {
@@ -344,7 +445,7 @@ function tsRenderTable(
           det = esc((ea.details as string) ?? "");
         } else if (ev.eventType === "Other Duties") {
           const ops = ((ea.operators as string[]) ?? []).join(", ");
-          const odShift = leaveShiftLabel(ev);
+          const odShift = otherDutiesShiftLabel(ev);
           const odBase = ops
             ? `${esc(ops)} &middot; ${esc(ea.subType as string)}`
             : esc(ea.subType as string);
@@ -355,16 +456,16 @@ function tsRenderTable(
           duty = "";
           det = esc(ea.leaveType as string);
         }
+        det += htmlPreviousFieldSummary(ev);
 
-        const timeStr =
-          ev.startTime + (ev.endTime ? ` &ndash; ${ev.endTime}` : "");
+        const timeStr = htmlTimeDiff(ev);
         h +=
           `<tr class="tr-ev${rowBase} td-date-first" data-id="${esc(ev.id)}" data-date="${dateKey}">` +
           `<td class="td-date">${esc(dateLabel)}</td>` +
-          `<td class="td-time">${timeStr}</td>` +
+          `<td class="td-time${hasPreviousTime(ev) ? " td-time-changed" : ""}">${timeStr}</td>` +
           `<td class="td-duty">${duty}</td>` +
           `<td class="td-det">${det}</td>` +
-          `<td class="td-insp">${htmlInspDiff(ev)}</td>` +
+          `<td class="td-insp">${htmlInspDiff(ev, shortName)}</td>` +
           "</tr>";
       }
     }
@@ -379,6 +480,7 @@ export function generateHtmlCalendar(
   month: number,
   events: RosterEvent[],
   operatorColors: Record<string, string>,
+  otherDutiesColors: Record<string, string>,
   operators: string[],
   inspectorNames: string[],
   holidays: Map<string, string>,
@@ -386,6 +488,8 @@ export function generateHtmlCalendar(
   changelog?: ChangelogEntry[],
   exportId?: string,
   changelogHistory?: ChangelogHistoryVersion[],
+  currentSnapshot?: RosterEvent[],
+  hasImportedBaseline = false,
 ): string {
   const monthStr = `${year}-${String(month).padStart(2, "0")}`;
   const monthTitle = `${MONTH_NAMES[month - 1]} ${year}`;
@@ -402,11 +506,18 @@ export function generateHtmlCalendar(
     month: "short",
     year: "numeric",
   });
+  const shortName = makeShortName(inspectorNames.map((name) => ({ name })));
+  const inspectorDisplayNames: Record<string, string> = {};
+  for (const name of inspectorNames) {
+    inspectorDisplayNames[name] = shortName(name);
+  }
 
   // Pre-render both views at export time so the page displays without JavaScript.
   const preGrid = tsRenderGrid(
     monthEvents,
     operatorColors,
+    otherDutiesColors,
+    shortName,
     year,
     month,
     monthStr,
@@ -415,6 +526,8 @@ export function generateHtmlCalendar(
   const preTable = tsRenderTable(
     monthEvents,
     operatorColors,
+    otherDutiesColors,
+    shortName,
     year,
     month,
     monthStr,
@@ -429,8 +542,10 @@ export function generateHtmlCalendar(
     month,
     events: monthEvents,
     operatorColors,
+    otherDutiesColors,
     operators,
     inspectorNames,
+    inspectorDisplayNames,
     holidays: holidayObj,
     monthStr,
     version: ver,
@@ -452,14 +567,24 @@ export function generateHtmlCalendar(
   const inspCheckboxes = inspectorNames
     .map(
       (n) =>
-        `<label class="fi"><input type="checkbox" class="ic" value="${esc(n)}"><span>${esc(n)}</span></label>`,
+        `<label class="fi"><input type="checkbox" class="ic" value="${esc(n)}"><span>${esc(shortName(n))}</span></label>`,
     )
     .join("");
 
   const versionBadge = `<span class="vb">v${ver}</span>`;
 
   const popupHtml =
-    ver > 0 ? buildPopupHtml(cl, ver, monthTitle, exportDate, changelogHistory ?? []) : "";
+    ver > 1
+      ? buildPopupHtml(
+          cl,
+          ver,
+          monthTitle,
+          exportDate,
+          changelogHistory ?? [],
+          currentSnapshot,
+          hasImportedBaseline,
+        )
+      : "";
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -528,10 +653,14 @@ function buildPopupHtml(
   monthTitle: string,
   exportDate: string,
   history: ChangelogHistoryVersion[],
+  currentSnapshot?: RosterEvent[],
+  hasImportedBaseline = false,
 ): string {
-  const added = changelog.filter((e) => e.kind === "added");
-  const changed = changelog.filter((e) => e.kind === "changed");
-  const removed = changelog.filter((e) => e.kind === "removed");
+  const isFirstExport = version === 1 && !hasImportedBaseline;
+  const visibleChangelog = isFirstExport ? [] : changelog;
+  const added = visibleChangelog.filter((e) => e.kind === "added");
+  const changed = visibleChangelog.filter((e) => e.kind === "changed");
+  const removed = visibleChangelog.filter((e) => e.kind === "removed");
 
   const section = (
     items: ChangelogEntry[],
@@ -551,7 +680,6 @@ function buildPopupHtml(
     </div>`;
   };
 
-  const isFirstExport = version === 1 && changelog.length === 0;
   const hasChanges =
     added.length > 0 || changed.length > 0 || removed.length > 0;
 
@@ -567,27 +695,59 @@ function buildPopupHtml(
     ? `v${version} &mdash; Initial Export`
     : `What&#8217;s New in v${version}`;
 
-  const previousVersions = history
-    .filter((item) => item.version < version)
-    .sort((a, b) => b.version - a.version);
-  const historyHtml = previousVersions.length === 0
-    ? ""
-    : `<details class="cl-history">
-        <summary>All past changes (${previousVersions.length} previous version${previousVersions.length === 1 ? "" : "s"})</summary>
-        <div class="cl-history-list">
-          ${previousVersions.map((item) => {
-            const itemAdded = item.entries.filter((e) => e.kind === "added");
-            const itemChanged = item.entries.filter((e) => e.kind === "changed");
-            const itemRemoved = item.entries.filter((e) => e.kind === "removed");
-            const itemBody = item.entries.length === 0
-              ? '<div class="cl-none">Initial export — no previous version to compare.</div>'
-              : `${section(itemAdded, "+", "Added", "cl-add")}
-                 ${section(itemChanged, "~", "Changed", "cl-chg")}
-                 ${section(itemRemoved, "−", "Removed", "cl-rem")}`;
-            return `<div class="cl-history-version"><div class="cl-history-title">v${item.version}</div>${itemBody}</div>`;
-          }).join("")}
-        </div>
-      </details>`;
+  const v1Snapshot = history.find((item) => item.version === 1)?.snapshot;
+  const committedSnapshot =
+    currentSnapshot ?? history.find((item) => item.version === version)?.snapshot;
+  let currentVsV1: ChangelogEntry[] | null = null;
+  if (
+    version > 1 &&
+    Array.isArray(v1Snapshot) &&
+    Array.isArray(committedSnapshot)
+  ) {
+    try {
+      currentVsV1 = computeChangelog(v1Snapshot, committedSnapshot);
+    } catch {
+      // A hand-edited or partially incompatible history record must not break
+      // an otherwise valid self-contained export.
+      currentVsV1 = null;
+    }
+  }
+
+  const historyBody =
+    currentVsV1 === null
+      ? '<div class="cl-none">The original v1 comparison is unavailable for this export.</div>'
+      : currentVsV1.length === 0
+        ? '<div class="cl-none">No changes from the original v1.</div>'
+        : `${section(
+            currentVsV1.filter((e) => e.kind === "added"),
+            "+",
+            "Added",
+            "cl-add",
+          )}
+           ${section(
+             currentVsV1.filter((e) => e.kind === "changed"),
+             "~",
+             "Changed",
+             "cl-chg",
+           )}
+           ${section(
+             currentVsV1.filter((e) => e.kind === "removed"),
+             "−",
+             "Removed",
+             "cl-rem",
+           )}`;
+  const historyHtml =
+    version <= 1
+      ? ""
+      : `<details class="cl-history">
+          <summary>Current version vs v1</summary>
+          <div class="cl-history-list">
+            <div class="cl-history-version">
+              <div class="cl-history-title">v${version} vs v1</div>
+              ${historyBody}
+            </div>
+          </div>
+        </details>`;
 
   return `<div class="ov" id="ov">
   <div class="cl" id="cl">
@@ -687,6 +847,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:v
 /* ── Tooltip ── */
 .tt{position:fixed;z-index:999;pointer-events:none;width:210px;background:var(--card);border:1px solid var(--border);border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.15);padding:10px;font-size:12px;display:flex;flex-direction:column;gap:5px}
 .th{display:flex;align-items:center;justify-content:space-between;gap:6px}
+.th-time-changed{margin:0 -4px;padding:2px 4px;border-radius:4px;background:rgba(245,158,11,.12)}
 .bd{padding:2px 6px;border-radius:3px;font-size:10px;font-weight:600}
 .bd-sim{background:var(--sim-bg);color:var(--sim-fg)}
 .bd-insp{background:var(--insp-bg);color:var(--insp-fg)}
@@ -696,7 +857,9 @@ body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:v
 .tf{display:flex;flex-direction:column;gap:3px}
 .m{color:var(--muted-fg)}
 .ti{padding-top:5px;border-top:1px solid var(--border)}
-.tp{text-decoration:line-through;color:var(--muted-fg);opacity:.5;font-size:10px;margin-top:2px}
+.tp{display:block;text-decoration:line-through;color:var(--muted-fg);opacity:.5;font-size:10px;margin-top:2px}
+.hf{margin-top:2px}
+.td-history{color:var(--muted-fg);opacity:.65;font-size:10px;margin-top:2px;text-decoration-color:currentColor}
 
 /* ── Changelog overlay + popup ── */
 .ov{position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:500;display:flex;align-items:center;justify-content:center}
@@ -779,6 +942,8 @@ body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:v
 .td-det{font-size:12px;color:var(--muted-fg)}
 .td-insp{color:var(--muted-fg);font-size:11px}
 .td-rem{text-decoration:line-through;opacity:.6}
+.td-time-changed{background:rgba(245,158,11,.12);border-radius:3px}
+.td-time-old{text-decoration:line-through;color:var(--muted-fg);opacity:.6;font-size:10px;white-space:nowrap}
 .td-add{color:#16a34a}
 [data-theme="dark"] .td-add{color:#4ade80}
 /* Date dedup: hide the date text on non-first visible rows per date group */
@@ -864,14 +1029,88 @@ for(var i=0;i<D.events.length;i++){
 }
 
 function eh(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+var EH_FIELDS=['eventType','date','startTime','endTime','inspectors','operator','simulatorCodes','aircraftType','activity','candidateName','surveillanceTypes','details','operators','subType','otherDutiesShift','customColor','remarks','leaveType','leaveShift'];
+var EH_LABELS={eventType:'Event type',date:'Date',startTime:'Start time',endTime:'End time',inspectors:'Inspectors',operator:'Operator',simulatorCodes:'Simulator codes',aircraftType:'Aircraft type',activity:'Activity',candidateName:'Candidate',surveillanceTypes:'Surveillance types',details:'Details',operators:'Operators',subType:'Duty type',otherDutiesShift:'Shift',customColor:'Custom colour',remarks:'Remarks',leaveType:'Leave type',leaveShift:'Shift'};
+function evField(ev,field){
+  if(field==='simulatorCodes'){
+    if(Array.isArray(ev.simulatorCodes))return ev.simulatorCodes.slice();
+    return ev.simulatorCode?[ev.simulatorCode]:null;
+  }
+  var v=ev[field];
+  if(Array.isArray(v))return v.slice();
+  if(typeof v==='string')return v===''?null:v;
+  return null;
+}
+function evPrevious(ev,field){
+  var p=ev.previousValues||{};
+  if(Object.prototype.hasOwnProperty.call(p,field))return {has:true,value:p[field]==null?null:p[field]};
+  if(field==='inspectors'&&ev.previousInspectors!==undefined)return {has:true,value:ev.previousInspectors};
+  if(field==='startTime'&&ev.previousStartTime!==undefined)return {has:true,value:ev.previousStartTime};
+  if(field==='endTime'&&ev.previousEndTime!==undefined)return {has:true,value:ev.previousEndTime};
+  return {has:false,value:null};
+}
+function evSame(field,a,b){
+  if(Array.isArray(a)||Array.isArray(b)){
+    if(!Array.isArray(a)||!Array.isArray(b))return false;
+    var aa=field==='inspectors'?a.slice().sort():a,bb=field==='inspectors'?b.slice().sort():b;
+    if(aa.length!==bb.length)return false;
+    for(var i=0;i<aa.length;i++)if(aa[i]!==bb[i])return false;
+    return true;
+  }
+  return a===b;
+}
+function evChanged(ev,field){
+  var p=evPrevious(ev,field);
+  return p.has&&!evSame(field,p.value,evField(ev,field));
+}
+function evHistoryValue(field,value){
+  if(value==null)return 'Not set';
+  if(Array.isArray(value))return value.length?value.join(', '):'None';
+  if(field==='date'){
+    var bits=String(value).split('-');
+    return bits.length===3?bits[2]+'-'+bits[1]+'-'+bits[0]:String(value);
+  }
+  return String(value);
+}
+function evHistoryDetails(ev){
+  var h='';
+  for(var i=0;i<EH_FIELDS.length;i++){
+    var field=EH_FIELDS[i];
+    if(field==='inspectors'||field==='startTime'||field==='endTime')continue;
+    if(!evChanged(ev,field))continue;
+    var old=evPrevious(ev,field).value;
+    h+='<div class="hf"><span class="m">Previous '+eh(EH_LABELS[field])+': </span><span class="tp">'+eh(evHistoryValue(field,old))+'</span></div>';
+  }
+  return h;
+}
+function shortInspectorName(n){
+  var displayNames=D.inspectorDisplayNames||{};
+  if(Object.prototype.hasOwnProperty.call(displayNames,n))return displayNames[n];
+  var first=String(n==null?'':n).split(' ')[0];
+  var count=0;
+  var all=D.inspectorNames||[];
+  for(var i=0;i<all.length;i++){
+    if(String(all[i]==null?'':all[i]).split(' ')[0]===first)count++;
+  }
+  if(count<=1)return first;
+  var parts=String(n==null?'':n).trim().split(/\s+/);
+  var lastInitial=parts.length>1?parts[parts.length-1].charAt(0):'';
+  return lastInitial?first+' '+lastInitial+'.':first;
+}
 
 function leaveShift(ev){
-  var re=/^([01]\\d|2[0-3]):[0-5]\\d$/;
   var s=ev.startTime||'',e=ev.endTime||'';
-  if(!re.test(s)||!re.test(e))return '';
+  if(!s&&!e)return '';
   if(s==='00:00'&&e==='23:59')return '';
-  if(e<='12:00'&&s<'12:00')return ' (AM)';
-  if(s>='12:00')return ' (PM)';
+  if(ev.leaveShift==='AM'||ev.leaveShift==='PM')return ' ('+ev.leaveShift+')';
+  return s&&e?' '+s+' – '+e:' '+(s||e);
+}
+
+function otherDutiesShift(ev){
+  var s=ev.startTime||'',e=ev.endTime||'';
+  if(!s&&!e)return '';
+  if(s==='00:00'&&e==='23:59')return '';
+  if(ev.otherDutiesShift==='AM'||ev.otherDutiesShift==='PM')return ' ('+ev.otherDutiesShift+')';
   return '';
 }
 
@@ -893,29 +1132,30 @@ function updateCalendarPeriod(){
   prev.classList.toggle('hidden',isMonth);
   next.classList.toggle('hidden',isMonth);
 }
- function evTypeOrder(ev){return ev.eventType==='Simulator'?0:ev.eventType==='Surveillance'?1:ev.eventType==='Other Duties'&&ev.subType==='Flying'?3:ev.eventType==='Other Duties'?2:4;}
+ function evTypeOrder(ev){return ev.eventType==='Operator Request'?0:ev.eventType==='Surveillance'?1:ev.eventType==='Other Duties'&&ev.subType==='Flying'?3:ev.eventType==='Other Duties'?2:4;}
 function evHexToRgb(h){var m=h&&h.match(/^#?([a-f\\d]{2})([a-f\\d]{2})([a-f\\d]{2})$/i);if(!m)return null;return[parseInt(m[1],16),parseInt(m[2],16),parseInt(m[3],16)];}
 function evPillStyle(hex){if(!hex)return '';var rgb=evHexToRgb(hex);if(!rgb)return '';return 'background:rgba('+rgb[0]+','+rgb[1]+','+rgb[2]+',0.13);border-color:rgba('+rgb[0]+','+rgb[1]+','+rgb[2]+',0.45);color:'+hex+';';}
-function evOpColor(ev){if(ev.eventType==='Simulator'||ev.eventType==='Surveillance')return (D.operatorColors&&D.operatorColors[ev.operator])||'';if(ev.eventType==='Other Duties'){if(typeof ev.customColor==='string'&&/^#[0-9a-f]{6}$/i.test(ev.customColor))return ev.customColor;var ops=ev.operators||[];return (ops[0]&&D.operatorColors&&D.operatorColors[ops[0]])||'';}return '';}
-function evLeaveShift(ev){var re=/^([01]\\d|2[0-3]):[0-5]\\d$/;var s=ev.startTime||'',e=ev.endTime||'';if(!re.test(s)||!re.test(e))return '';if(s==='00:00'&&e==='23:59')return '';if(e<='12:00'&&s<'12:00')return 'AM';if(s>='12:00')return 'PM';return '';}
+ function evOpColor(ev){if(ev.eventType==='Operator Request'||ev.eventType==='Surveillance')return (D.operatorColors&&D.operatorColors[ev.operator])||'';if(ev.eventType==='Other Duties'){var ops=ev.operators||[];for(var i=0;i<ops.length;i++){var operatorColor=D.operatorColors&&D.operatorColors[ops[i]];if(operatorColor)return operatorColor;}if(typeof ev.customColor==='string'&&/^#[0-9a-f]{6}$/i.test(ev.customColor))return ev.customColor;return (D.otherDutiesColors&&D.otherDutiesColors[ev.subType])||'';}return '';}
+function evLeaveShift(ev){var s=ev.startTime||'',e=ev.endTime||'';if(!s&&!e)return '';if(s==='00:00'&&e==='23:59')return '';if(ev.leaveShift==='AM'||ev.leaveShift==='PM')return ev.leaveShift;return s&&e?s+'\\u2013'+e:s||e;}
+function evOtherDutiesShift(ev){var s=ev.startTime||'',e=ev.endTime||'';if(!s&&!e)return '';if(s==='00:00'&&e==='23:59')return '';if(ev.otherDutiesShift==='AM'||ev.otherDutiesShift==='PM')return ev.otherDutiesShift;return '';}
 function evPillContent(ev){
-  var fn=function(n){return n.split(' ')[0];};
-  if(ev.eventType==='Leave'){var names=(ev.inspectors||[]).map(fn).join(', ');var shift=evLeaveShift(ev);return '<span class="pl">'+eh(names+' '+(ev.leaveType||'')+(shift?' '+shift:''))+'</span>';}
-  var names=(ev.inspectors||[]).map(fn).join(', ');
+  if(ev.eventType==='Leave'){var names=(ev.inspectors||[]).map(shortInspectorName).join(', ');var shift=evLeaveShift(ev);return '<span class="pl">'+eh(names+' '+(ev.leaveType||'')+(shift?' '+shift:''))+'</span>';}
+  var names=(ev.inspectors||[]).map(shortInspectorName).join(', ');
   var op=ev.eventType==='Other Duties'?(ev.operators||[]).filter(function(o){return o&&o.toLowerCase()!=='n/a';}).join('/'):(ev.operator||'');
-  var detail=ev.eventType==='Simulator'?(ev.activity||''):ev.eventType==='Surveillance'?(((ev.surveillanceTypes||[]).join(', '))+' surveillance'):ev.eventType==='Other Duties'?(ev.subType||''):'';
-  var shift=ev.eventType==='Other Duties'?evLeaveShift(ev):'';
+  var detail=ev.eventType==='Operator Request'?(ev.activity||''):ev.eventType==='Surveillance'?(((ev.surveillanceTypes||[]).join(', '))+' surveillance'+(ev.details?' '+ev.details:'')):ev.eventType==='Other Duties'?(ev.subType||''):'';
+  var shift=ev.eventType==='Other Duties'?evOtherDutiesShift(ev):'';
   var s=ev.startTime||'',e=ev.endTime||'';
   var time=!shift&&s&&!(s==='00:00'&&e==='23:59')?(s+'\u2013'+e):'';
-  var parts=[names,op,detail,shift?'('+shift+')':time].filter(Boolean);
+  var remark=ev.eventType==='Other Duties'&&ev.appendRemarkToCalendarPill===true&&typeof ev.remarks==='string'?ev.remarks.trim():'';
+  var parts=[names,op,detail,remark,shift?'('+shift+')':time].filter(Boolean);
   return '<span class="pl">'+eh(parts.join(' '))+'</span>';
 }
 
 function tooltipHtml(ev){
-  var bt={Simulator:'sim',Surveillance:'insp','Other Duties':'duty',Leave:'leave'}[ev.eventType]||'leave';
+  var bt={'Operator Request':'sim',Surveillance:'insp','Other Duties':'duty',Leave:'leave'}[ev.eventType]||'leave';
   var f='';
-  if(ev.eventType==='Simulator'){
-    f='<div><span class="m">Code: </span>'+eh(ev.simulatorCode)+' &middot; '+eh(ev.aircraftType)+'</div>'
+  if(ev.eventType==='Operator Request'){
+    f='<div><span class="m">Code: </span>'+eh((ev.simulatorCodes||[ev.simulatorCode]).join(', '))+' &middot; '+eh(ev.aircraftType)+'</div>'
      +'<div><span class="m">Activity: </span>'+eh(ev.activity)+'</div>'
      +'<div><span class="m">Operator: </span>'+eh(ev.operator)+'</div>'
      +'<div><span class="m">Candidate: </span>'+eh(ev.candidateName)+'</div>';
@@ -927,15 +1167,25 @@ function tooltipHtml(ev){
   }else if(ev.eventType==='Other Duties'){
     var ops=(ev.operators||[]).join(', ');
     f=(ops?'<div><span class="m">Operator: </span>'+eh(ops)+'</div>':'')
-     +'<div><span class="m">Type: </span>'+eh(ev.subType)+eh(leaveShift(ev))+'</div>'
+     +'<div><span class="m">Type: </span>'+eh(ev.subType)+eh(otherDutiesShift(ev))+'</div>'
      +(ev.remarks?'<div><span class="m">Remarks: </span>'+eh(ev.remarks)+'</div>':'');
   }else{
     f='<div><span class="m">Leave: </span>'+eh(ev.leaveType+leaveShift(ev))+'</div>';
   }
-  var insp=(ev.inspectors||[]).map(function(n){return n.split(' ')[0];}).join(', ');
-  var prev=ev.previousInspectors?'<div class="tp">'+eh(ev.previousInspectors.map(function(n){return n.split(' ')[0];}).join(', '))+'</div>':'';
-  return '<div class="th"><span class="bd bd-'+bt+'">'+eh(ev.eventType)+'</span>'
-    +'<span class="tm">'+eh(ev.startTime)+'&ndash;'+eh(ev.endTime)+'</span></div>'
+   var insp=(ev.inspectors||[]).map(shortInspectorName).join(', ');
+   var inspPrev=evPrevious(ev,'inspectors');
+   var prev=evChanged(ev,'inspectors')?'<div class="tp">'+eh(evHistoryValue('inspectors',(inspPrev.value||[]).map(shortInspectorName)))+'</div>':'';
+    var timeChanged=evChanged(ev,'startTime')||evChanged(ev,'endTime');
+    var dateBits=String(ev.date||'').split('-');
+    var dateText=dateBits.length===3?dateBits[2]+'-'+dateBits[1]+'-'+dateBits[0]:String(ev.date||'');
+    f='<div><span class="m">Date: </span>'+eh(dateText)+'</div>'+f+evHistoryDetails(ev);
+   var time=eh(ev.startTime)+'&ndash;'+eh(ev.endTime);
+   if(timeChanged){
+      var ps=evPrevious(ev,'startTime').value,pe=evPrevious(ev,'endTime').value;
+      time+='<span class="tp">'+eh(ps)+'&ndash;'+eh(pe)+'</span>';
+   }
+   return '<div class="th'+(timeChanged?' th-time-changed':'')+'"><span class="bd bd-'+bt+'">'+eh(ev.eventType)+'</span>'
+     +'<span class="tm">'+time+'</span></div>'
     +'<div class="tf">'+f+'</div>'
     +'<div class="ti"><span class="m">'+eh(insp)+'</span>'+prev+'</div>';
 }
@@ -1111,7 +1361,7 @@ function matchesPill(id){
   }
   if(filterInsp.size>0){
     var ok2=false;
-    for(var i=0;i<insp.length;i++){if(filterInsp.has(insp[i].split(' ')[0])){ok2=true;break;}}
+    for(var i=0;i<insp.length;i++){if(filterInsp.has(insp[i])){ok2=true;break;}}
     if(!ok2)return false;
   }
   return true;
@@ -1273,9 +1523,9 @@ document.getElementById('pr-btn').addEventListener('click',function(){window.pri
   function icsDtStamp(){var n=new Date(),p=function(x){return String(x).padStart(2,'0');};return n.getUTCFullYear()+p(n.getUTCMonth()+1)+p(n.getUTCDate())+'T'+p(n.getUTCHours())+p(n.getUTCMinutes())+p(n.getUTCSeconds())+'Z';}
   function icsNextDate(ds){var p=ds.split('-').map(Number),nx=new Date(Date.UTC(p[0],p[1]-1,p[2]+1));return nx.getUTCFullYear()+(nx.getUTCMonth()+1<10?'0':'')+(nx.getUTCMonth()+1)+(nx.getUTCDate()<10?'0':'')+nx.getUTCDate();}
   function icsDt(date,time){return date.replace(/-/g,'')+'-T'+time.replace(':','')+'00';}
-  function icsSum(ev){if(ev.eventType==='Simulator')return 'Simulator \\u2013 '+(ev.operator||'')+' '+(ev.activity||'');if(ev.eventType==='Surveillance')return 'Surveillance \\u2013 '+(ev.operator||'')+' '+((ev.surveillanceTypes||[]).join(', '));if(ev.eventType==='Other Duties')return 'Other Duties \\u2013 '+(ev.subType||'');return 'Leave \\u2013 '+(ev.leaveType||'');}
+  function icsSum(ev){if(ev.eventType==='Operator Request')return 'Operator Request \\u2013 '+(ev.operator||'')+' '+(ev.activity||'');if(ev.eventType==='Surveillance')return 'Surveillance \\u2013 '+(ev.operator||'')+' '+((ev.surveillanceTypes||[]).join(', '));if(ev.eventType==='Other Duties')return 'Other Duties \\u2013 '+(ev.subType||'');return 'Leave \\u2013 '+(ev.leaveType||'');}
   function icsFn(n){return (n||'').split(' ')[0];}
-  function icsDesc(ev){var p=[];var ns=(ev.inspectors||[]).map(icsFn).join(', ');if(ns)p.push('Inspectors: '+icsEsc(ns));if(ev.eventType==='Simulator'){if(ev.simulatorCode)p.push('Code: '+icsEsc(ev.simulatorCode));if(ev.candidateName)p.push('Candidate: '+icsEsc(ev.candidateName));}else if(ev.eventType==='Surveillance'){if(ev.details)p.push('Details: '+icsEsc(ev.details));}else if(ev.eventType==='Other Duties'){var ops=(ev.operators||[]).join(', ');if(ops)p.push('Operator: '+icsEsc(ops));if(ev.remarks)p.push('Remarks: '+icsEsc(ev.remarks));}return p.join('\\\\n');}
+  function icsDesc(ev){var p=[];var ns=(ev.inspectors||[]).map(icsFn).join(', ');if(ns)p.push('Inspectors: '+icsEsc(ns));if(ev.eventType==='Operator Request'){var codes=(ev.simulatorCodes||[ev.simulatorCode]).join(', ');if(codes)p.push('Code: '+icsEsc(codes));if(ev.candidateName)p.push('Candidate: '+icsEsc(ev.candidateName));}else if(ev.eventType==='Surveillance'){if(ev.details)p.push('Details: '+icsEsc(ev.details));}else if(ev.eventType==='Other Duties'){var ops=(ev.operators||[]).join(', ');if(ops)p.push('Operator: '+icsEsc(ops));if(ev.remarks)p.push('Remarks: '+icsEsc(ev.remarks));}return p.join('\\\\n');}
   function icsVEvent(ev){var allDay=!ev.startTime||(ev.startTime==='00:00'&&(!ev.endTime||ev.endTime==='23:59'));var ds,de;if(allDay){ds='DTSTART;VALUE=DATE:'+ev.date.replace(/-/g,'');de='DTEND;VALUE=DATE:'+icsNextDate(ev.date);}else{ds='DTSTART:'+ev.date.replace(/-/g,'')+'T'+ev.startTime.replace(':','')+'00';de='DTEND:'+ev.date.replace(/-/g,'')+'T'+(ev.endTime||ev.startTime).replace(':','')+'00';}var desc=icsDesc(ev);var lines=['BEGIN:VEVENT',icsFold('DTSTAMP:'+icsDtStamp()),icsFold(ds),icsFold(de),icsFold('SUMMARY:'+icsEsc(icsSum(ev).trim()))];if(desc)lines.push(icsFold('DESCRIPTION:'+desc));lines.push(icsFold('UID:'+icsEsc(ev.id)+'@roster-manager'));lines.push('END:VEVENT');return lines.join('\\r\\n');}
   document.getElementById('ics-btn').addEventListener('click',function(){
     var evs=D.events||[];

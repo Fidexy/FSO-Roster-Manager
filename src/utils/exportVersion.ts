@@ -4,8 +4,9 @@
  * localStorage keys:
  *   exportVersion-YYYY-MM    — integer; 0 / absent = no version committed yet
  *   htmlSnapshot-YYYY-MM     — JSON array of RosterEvent; the state at the last committed version
+ *   exportBaseline-YYYY-MM  — JSON array of RosterEvent; imported state before the first commit
  *   versionChangelog-YYYY-MM — JSON array of ChangelogEntry; computed at commit time (before snapshot overwrite)
- *   versionChangelogHistory-YYYY-MM — versioned changelogs used by exported HTML popups
+ *   versionChangelogHistory-YYYY-MM — versioned changelogs and snapshots used by exported HTML popups
  */
 
 import type { RosterEvent } from '@/store/rosterStore';
@@ -13,6 +14,7 @@ import type { ChangelogEntry, ChangelogHistoryVersion } from '@/utils/exportDiff
 
 const vk = (m: string) => `exportVersion-${m}`;
 const sk = (m: string) => `htmlSnapshot-${m}`;
+const bk = (m: string) => `exportBaseline-${m}`;
 const ck = (m: string) => `versionChangelog-${m}`;
 const hk = (m: string) => `versionChangelogHistory-${m}`;
 
@@ -33,10 +35,11 @@ export function incrementExportVersion(monthStr: string): number {
   return next;
 }
 
-/** Removes the version counter, snapshot, and stored changelog for a month. */
+/** Removes the version counter, snapshots, baselines, and stored changelogs for a month. */
 export function resetExportVersion(monthStr: string): void {
   localStorage.removeItem(vk(monthStr));
   localStorage.removeItem(sk(monthStr));
+  localStorage.removeItem(bk(monthStr));
   localStorage.removeItem(ck(monthStr));
   localStorage.removeItem(hk(monthStr));
 }
@@ -50,6 +53,7 @@ export function resetAllExportVersions(): void {
     k =>
       k.startsWith('exportVersion-') ||
       k.startsWith('htmlSnapshot-') ||
+      k.startsWith('exportBaseline-') ||
       k.startsWith('versionChangelog-') ||
       k.startsWith('versionChangelogHistory-'),
   );
@@ -61,6 +65,23 @@ export function readVersionSnapshot(monthStr: string): RosterEvent[] | null {
   const raw = localStorage.getItem(sk(monthStr));
   if (!raw) return null;
   try { return JSON.parse(raw) as RosterEvent[]; } catch { return null; }
+}
+
+/** Returns the imported pre-v1 baseline for a month, or null when none exists. */
+export function readVersionBaseline(monthStr: string): RosterEvent[] | null {
+  const raw = localStorage.getItem(bk(monthStr));
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return isUsableSnapshot(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Stores the imported pre-v1 baseline for a month. */
+export function writeVersionBaseline(monthStr: string, events: RosterEvent[]): void {
+  localStorage.setItem(bk(monthStr), JSON.stringify(events));
 }
 
 /**
@@ -92,21 +113,118 @@ export function readVersionChangelogHistory(monthStr: string): ChangelogHistoryV
   if (!raw) return [];
   try {
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed.flatMap((item): ChangelogHistoryVersion[] => {
+      if (
+        !item ||
+        typeof item !== "object" ||
+        !Number.isInteger(item.version) ||
+        item.version < 1 ||
+        !Array.isArray(item.entries)
+      ) {
+        return [];
+      }
+
+      const entries = item.entries.filter((entry: unknown): entry is ChangelogEntry => {
+        if (!entry || typeof entry !== "object") return false;
+        const candidate = entry as Partial<ChangelogEntry>;
+        return (
+          (candidate.kind === "added" ||
+            candidate.kind === "changed" ||
+            candidate.kind === "removed") &&
+          typeof candidate.label === "string" &&
+          Array.isArray(candidate.detail) &&
+          candidate.detail.every((detail) => typeof detail === "string") &&
+          typeof candidate.date === "string" &&
+          (candidate.detailHtml === undefined ||
+            (Array.isArray(candidate.detailHtml) &&
+              candidate.detailHtml.every((detail) => typeof detail === "string")))
+        );
+      });
+
+      const historyVersion: ChangelogHistoryVersion = {
+        version: item.version,
+        entries,
+      };
+
+      // Snapshots were added after changelog history was introduced. Keep
+      // legacy records usable, but only expose snapshots that are safe for
+      // computeChangelog to inspect.
+      if (isUsableSnapshot(item.snapshot)) {
+        historyVersion.snapshot = item.snapshot;
+      }
+
+      return [historyVersion];
+    });
   } catch {
     return [];
   }
 }
 
-/** Records a changelog once for its committed version, replacing an accidental duplicate. */
+function isUsableSnapshot(value: unknown): value is RosterEvent[] {
+  if (!Array.isArray(value)) return false;
+
+  return value.every((event) => {
+    if (!event || typeof event !== "object") return false;
+    const candidate = event as Partial<RosterEvent>;
+    if (
+      typeof candidate.id !== "string" ||
+      typeof candidate.eventType !== "string" ||
+      typeof candidate.date !== "string" ||
+      typeof candidate.startTime !== "string" ||
+      typeof candidate.endTime !== "string" ||
+      !Array.isArray(candidate.inspectors) ||
+      !candidate.inspectors.every((inspector) => typeof inspector === "string")
+    ) {
+      return false;
+    }
+
+    if (
+      candidate.eventType === "Operator Request" &&
+      (typeof candidate.operator !== "string" ||
+        typeof candidate.activity !== "string" ||
+        (candidate.simulatorCodes !== undefined &&
+          (!Array.isArray(candidate.simulatorCodes) ||
+            !candidate.simulatorCodes.every((code) => typeof code === "string"))) ||
+        (candidate.simulatorCodes === undefined &&
+          typeof candidate.simulatorCode !== "string"))
+    ) {
+      return false;
+    }
+
+    if (
+      candidate.eventType === "Surveillance" &&
+      (typeof candidate.operator !== "string" ||
+        !Array.isArray(candidate.surveillanceTypes) ||
+        !candidate.surveillanceTypes.every((type) => typeof type === "string"))
+    ) {
+      return false;
+    }
+
+    return (
+      candidate.eventType === "Operator Request" ||
+      candidate.eventType === "Surveillance" ||
+      candidate.eventType === "Other Duties" ||
+      candidate.eventType === "Leave"
+    );
+  });
+}
+
+/** Records a changelog and immutable roster snapshot for its committed version. */
 export function appendVersionChangelogHistory(
   monthStr: string,
   version: number,
   entries: ChangelogEntry[],
+  snapshot?: RosterEvent[],
 ): void {
   const history = readVersionChangelogHistory(monthStr)
     .filter(item => item.version !== version);
-  history.push({ version, entries });
+  history.push({
+    version,
+    entries,
+    ...(snapshot ? { snapshot } : {}),
+  });
   history.sort((a, b) => a.version - b.version);
   localStorage.setItem(hk(monthStr), JSON.stringify(history));
 }

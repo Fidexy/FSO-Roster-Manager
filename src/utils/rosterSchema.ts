@@ -56,7 +56,7 @@ export const ROSTER_SCHEMA = {
         },
         eventType: {
           type: 'string',
-          enum: ['Simulator', 'Surveillance', 'Other Duties', 'Leave'],
+           enum: ['Operator Request', 'Surveillance', 'Other Duties', 'Leave'],
           description:
             'Discriminator field. Must exactly match one of the four permitted values. ' +
             'Determines which additional fields are required.',
@@ -83,7 +83,7 @@ export const ROSTER_SCHEMA = {
           description:
             'Ordered list of inspector display names (not IDs) assigned to this event. ' +
             'Names must match entries in the inspector roster stored in Settings. ' +
-            'For Simulator events, at least one inspector must hold a position that is ' +
+             'For Operator Request events, at least one inspector must hold a position that is ' +
             'qualified for the chosen activity (see Qualifications in Settings). ' +
             'When multiple inspectors are shown, qualified inspectors are listed first.',
           examples: [['Robin', 'Steve']],
@@ -95,26 +95,67 @@ export const ROSTER_SCHEMA = {
             'event that will be atomically replaced when this staged item is committed. ' +
             'Importers should omit this field entirely.',
         },
+        previousStartTime: {
+          $ref: '#/$defs/TimeString',
+          description:
+            'Previous start time captured when a committed edit changes the event time range. ' +
+            'Only the immediately preceding value is retained.',
+        },
+        previousEndTime: {
+          $ref: '#/$defs/TimeString',
+          description:
+            'Previous end time captured when a committed edit changes the event time range. ' +
+            'Only the immediately preceding value is retained.',
+        },
+        previousValues: {
+          type: 'object',
+          description:
+            'Immediately preceding values for all editable fields changed by the ' +
+            'most recent committed edit. A null value means the field was absent ' +
+            'before the edit. Only the immediately preceding values are retained.',
+          additionalProperties: false,
+          properties: {
+            eventType: { type: ['string', 'null'] },
+            date: { type: ['string', 'null'] },
+            startTime: { type: ['string', 'null'] },
+            endTime: { type: ['string', 'null'] },
+            inspectors: { type: ['array', 'null'], items: { type: 'string' } },
+            operator: { type: ['string', 'null'] },
+            simulatorCodes: { type: ['array', 'null'], items: { type: 'string' } },
+            aircraftType: { type: ['string', 'null'] },
+            activity: { type: ['string', 'null'] },
+            candidateName: { type: ['string', 'null'] },
+            surveillanceTypes: { type: ['array', 'null'], items: { type: 'string' } },
+            details: { type: ['string', 'null'] },
+            operators: { type: ['array', 'null'], items: { type: 'string' } },
+            subType: { type: ['string', 'null'] },
+            otherDutiesShift: { type: ['string', 'null'] },
+            customColor: { type: ['string', 'null'] },
+            remarks: { type: ['string', 'null'] },
+            leaveType: { type: ['string', 'null'] },
+            leaveShift: { type: ['string', 'null'] },
+          },
+        },
       },
     },
 
-    // ── Simulator ─────────────────────────────────────────────────────────────
+    // ── Operator Request ─────────────────────────────────────────────────────
 
-    SimulatorEvent: {
+    OperatorRequestEvent: {
       allOf: [{ $ref: '#/$defs/BaseEvent' }],
-      title: 'SimulatorEvent',
+      title: 'OperatorRequestEvent',
       description:
         'A simulator check / training session. Requires at least one qualified inspector ' +
         'for the nominated activity.',
       required: [
         'id', 'eventType', 'date', 'startTime', 'endTime', 'inspectors',
-        'operator', 'simulatorCode', 'aircraftType', 'activity', 'candidateName',
+        'operator', 'simulatorCodes', 'aircraftType', 'activity', 'candidateName',
       ],
       properties: {
         eventType: {
           type: 'string',
-          const: 'Simulator',
-          description: 'Must be exactly "Simulator".',
+           const: 'Operator Request',
+           description: 'Must be exactly "Operator Request".',
         },
         operator: {
           type: 'string',
@@ -125,20 +166,22 @@ export const ROSTER_SCHEMA = {
             '"AHK", "CAE HK", "CPA", "GFS", "HEL", "HGB", "HKA", "HKC", "HKE".',
           examples: ['CPA', 'HKA'],
         },
-        simulatorCode: {
-          type: 'string',
+        simulatorCodes: {
+          type: 'array',
+          items: { type: 'string' },
+          minItems: 0,
           description:
-            'The simulator device code as configured in the Simulator Map in Settings. ' +
-            'Selecting a known code auto-populates aircraftType. ' +
+            'The simulator device codes as configured in the Simulator Map in Settings. ' +
+            'The first selected code initially populates aircraftType, which can then be edited. ' +
             'Default codes include: "CPA01", "CPA02", "CPA14" … "HK07" (see Settings → Simulator Map).',
           examples: ['CPA01', 'GFS01'],
         },
         aircraftType: {
           type: 'string',
           description:
-            'Aircraft type associated with the simulator code. Auto-populated from the ' +
-            'Simulator Map when a known code is selected; may be entered manually for ' +
-            'unknown codes. ' +
+            'Aircraft type associated with the simulator code. Initially populated from the ' +
+            'Simulator Map when a known code is selected, but may be edited for this event, ' +
+            'including for unknown codes. ' +
             'Examples from the default map: "A320-200", "A330 (RR)", "B777-300ER", "EC175".',
           examples: ['A320-200', 'B777-300ER'],
         },
@@ -168,13 +211,13 @@ export const ROSTER_SCHEMA = {
       examples: [
         {
           id: 'a1b2c3d4-0000-0000-0000-000000000001',
-          eventType: 'Simulator',
+           eventType: 'Operator Request',
           date: '2025-06-15',
           startTime: '09:00',
           endTime: '12:00',
           inspectors: ['Robin', 'Steve'],
           operator: 'CPA',
-          simulatorCode: 'CPA01',
+          simulatorCodes: ['CPA01'],
           aircraftType: 'A320-200',
           activity: 'AE Initial',
           candidateName: 'Chan, Tai Man',
@@ -285,13 +328,27 @@ export const ROSTER_SCHEMA = {
             'Any free-text value is accepted (select "Custom" in the form).',
           examples: ['AEX Course', 'MOR Meeting', 'Recurrent Training'],
         },
+        otherDutiesShift: {
+          type: 'string',
+          enum: ['AM', 'PM'],
+          description:
+            'Optional shortcut selection. Present only when the AM or PM button ' +
+            'was explicitly pressed; otherwise the pill displays the stored time.',
+        },
         customColor: {
           type: 'string',
           pattern: '^#[0-9a-fA-F]{6}$',
           description:
             'Optional hex color override for Custom Other Duties entries. ' +
-            'When omitted, the calendar uses the first selected operator color.',
+            'Operator colors take priority; when omitted, the calendar uses the ' +
+            'configured subtype color.',
           examples: ['#6b7280'],
+        },
+        appendRemarkToCalendarPill: {
+          type: 'boolean',
+          description:
+            'When true, append the trimmed, non-empty remarks text to the end ' +
+            'of this event’s calendar pill label.',
         },
       },
       examples: [
@@ -335,6 +392,13 @@ export const ROSTER_SCHEMA = {
             'Any free-text value is accepted (select "Custom" in the form).',
           examples: ['VL', 'MA', 'TOIL', 'Overseas Duties', 'Study Leave'],
         },
+        leaveShift: {
+          type: 'string',
+          enum: ['AM', 'PM'],
+          description:
+            'Optional shortcut selection. Present only when the AM or PM button ' +
+            'was explicitly pressed; otherwise the pill displays the stored time.',
+        },
       },
       examples: [
         {
@@ -353,7 +417,7 @@ export const ROSTER_SCHEMA = {
 
   // ── Root: discriminated union ──────────────────────────────────────────────
   oneOf: [
-    { $ref: '#/$defs/SimulatorEvent' },
+     { $ref: '#/$defs/OperatorRequestEvent' },
     { $ref: '#/$defs/SurveillanceEvent' },
     { $ref: '#/$defs/OtherDutiesEvent' },
     { $ref: '#/$defs/LeaveEvent' },
@@ -364,13 +428,13 @@ export const ROSTER_SCHEMA = {
     [
       {
         id: 'a1b2c3d4-0000-0000-0000-000000000001',
-        eventType: 'Simulator',
+         eventType: 'Operator Request',
         date: '2025-06-15',
         startTime: '09:00',
         endTime: '12:00',
         inspectors: ['Robin', 'Steve'],
         operator: 'CPA',
-        simulatorCode: 'CPA01',
+        simulatorCodes: ['CPA01'],
         aircraftType: 'A320-200',
         activity: 'AE Initial',
         candidateName: 'Chan, Tai Man',

@@ -96,16 +96,16 @@ src/
 
 | Type | Key field | Notes |
 |---|---|---|
-| `SimulatorEvent` | `eventType: 'Simulator'` | Has `simulatorId`, `inspectors[]`, duration, qualifications-gated |
+| `OperatorRequestEvent` | `eventType: 'Operator Request'` | Has simulator fields, `inspectors[]`, duration, qualifications-gated |
 | `SurveillanceEvent` | `eventType: 'Surveillance'` | Has `operator`, `surveillanceTypes[]` (multi-select), free-text `details` |
 | `OtherDutiesEvent` | `eventType: 'OtherDuties'` | Free-form duty description |
 | `LeaveEvent` | `eventType: 'Leave'` | Inspector out; renders `bg-gray-600` pills, sorted last per day |
 
-> **Legacy note:** Old JSON exports may contain `eventType: 'OOO'` or `'AEX/MOR'`. No migration shim exists yet — they load but render incorrectly. Legacy `eventType: 'Inspection'` events (with `inspectionType` / `route` / `flightNo` / `station`) **are** migrated automatically to `Surveillance` on load and import.
+> **Legacy note:** Old JSON exports may contain `eventType: 'Simulator'`; these are automatically migrated to `Operator Request` before validation and rendering. Legacy `eventType: 'Inspection'` events (with `inspectionType` / `route` / `flightNo` / `station`) are also migrated automatically to `Surveillance` on load and import.
 
 ### Calendar Day Sort Order
 
-Events within a day sort by `typeOrder`: Simulator (0) → Surveillance (1) → OtherDuties (2) → Leave (3), then by start time.
+Events within a day sort by `typeOrder`: Operator Request (0) → Surveillance (1) → OtherDuties (2) → Leave (3), then by start time.
 
 ### Multi-day timed events
 
@@ -165,15 +165,15 @@ validateEvent(
 ): ValidationResult
 ```
 
-- Checks time ordering, same-day inspector double-booking, and Simulator qualification.
+- Checks time ordering, same-day inspector double-booking, and Operator Request qualification.
 - **Swap conflict fix:** When staging two swap events, pass `allSourceIds` as a `Set<string>` (built from the full staging queue) so each staged event sees the other's original as already removed.
 
 ---
 
 ## Key Behaviours to Preserve
 
-### Qualified Inspectors First (Simulator events)
-`sortedInspectors()` — a helper defined locally in both `CalendarGrid.tsx` and `StagingQueue.tsx` — reorders the inspector list so those whose ID appears in `qualifications[activity]` float to the top. Non-Simulator events are unaffected.
+### Qualified Inspectors First (Operator Request events)
+`sortedInspectors()` — a helper defined locally in both `CalendarGrid.tsx` and `StagingQueue.tsx` — reorders the inspector list so those whose position appears in `qualifications[activity]` float to the top. Non-Operator Request events are unaffected.
 
 ### Filter-Aware Exports
 All three export paths (JSON, Word, Excel) call `applyCalendarFilters()` when any calendar filter is active, and display a filter-count notice in the export.

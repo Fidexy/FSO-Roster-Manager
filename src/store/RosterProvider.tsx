@@ -6,6 +6,7 @@ import {
   DEFAULT_INSPECTORS,
   DEFAULT_OPERATORS,
   DEFAULT_OPERATOR_COLORS,
+  DEFAULT_OTHER_DUTIES_COLORS,
   DEFAULT_QUALIFICATIONS,
   DEFAULT_SIMULATOR_ACTIVITIES,
   DEFAULT_SIMULATOR_MAP,
@@ -23,6 +24,7 @@ import {
   parseEvents,
   parseJson,
   rosterReducer,
+  sortInspectorsByName,
 } from './rosterStore';
 import { loadData, saveData } from '../utils/storage';
 import { toast } from 'sonner';
@@ -61,10 +63,19 @@ function migrateEvents(
   return events.map(ev => {
     const inspectors = ev.inspectors.map(upgrade);
     const previousInspectors = ev.previousInspectors?.map(upgrade);
+    const previousValues = ev.previousValues
+      ? {
+          ...ev.previousValues,
+          ...(Array.isArray(ev.previousValues.inspectors)
+            ? { inspectors: ev.previousValues.inspectors.map(upgrade) }
+            : {}),
+        }
+      : undefined;
     return {
       ...ev,
       inspectors,
       ...(previousInspectors ? { previousInspectors } : {}),
+      ...(previousValues ? { previousValues } : {}),
     };
   });
 }
@@ -85,7 +96,7 @@ export function RosterProvider({ children }: { children: React.ReactNode }) {
       const [
         storedVersion,
         stagingRaw, calendarRaw, inspectorsRaw, qualsRaw,
-        operatorsRaw, colorsRaw, simActsRaw, simMapRaw,
+         operatorsRaw, colorsRaw, otherDutiesColorsRaw, simActsRaw, simMapRaw,
         survActsRaw, survQualsRaw, leaveTypesRaw, dutySubTypesRaw,
       ] = await Promise.all([
         loadData('roster_version'),
@@ -95,6 +106,7 @@ export function RosterProvider({ children }: { children: React.ReactNode }) {
         loadData('roster_qualifications'),
         loadData('roster_operators'),
         loadData('roster_operatorColors'),
+         loadData('roster_otherDutiesColors'),
         loadData('roster_simulatorActivities'),
         loadData('roster_simulatorMap'),
         loadData('roster_surveillanceActivities'),
@@ -115,8 +127,8 @@ export function RosterProvider({ children }: { children: React.ReactNode }) {
 
       // Load inspectors first so the migration pass can use them.
       const loadedInspectors: Inspector[] = versionMatch
-        ? parseJson(inspectorsRaw, DEFAULT_INSPECTORS, onCorrupt('inspectors'))
-        : DEFAULT_INSPECTORS;
+        ? sortInspectorsByName(parseJson(inspectorsRaw, DEFAULT_INSPECTORS, onCorrupt('inspectors')))
+        : sortInspectorsByName(DEFAULT_INSPECTORS);
 
       // Upgrade any legacy first-name-only inspector strings to full names.
       const firstToFull = buildFirstToFullMap(loadedInspectors);
@@ -132,6 +144,7 @@ export function RosterProvider({ children }: { children: React.ReactNode }) {
           qualifications:      versionMatch ? parseJson(qualsRaw,      DEFAULT_QUALIFICATIONS,      onCorrupt('qualifications')) : DEFAULT_QUALIFICATIONS,
           operators:           parseJson(operatorsRaw, DEFAULT_OPERATORS,           onCorrupt('operators')).slice().sort((a: string, b: string) => a.localeCompare(b, undefined, { sensitivity: 'base' })),
           operatorColors:      parseJson(colorsRaw,    DEFAULT_OPERATOR_COLORS,    onCorrupt('operator colours')),
+           otherDutiesColors:   parseJson(otherDutiesColorsRaw, DEFAULT_OTHER_DUTIES_COLORS, onCorrupt('other duties colours')),
           simulatorActivities: parseJson(simActsRaw,   DEFAULT_SIMULATOR_ACTIVITIES, onCorrupt('simulator activities')).slice().sort((a: string, b: string) => a.localeCompare(b, undefined, { sensitivity: 'base' })),
           surveillanceActivities: parseJson(survActsRaw, DEFAULT_SURVEILLANCE_ACTIVITIES, onCorrupt('surveillance activities')).slice().sort((a: string, b: string) => a.localeCompare(b, undefined, { sensitivity: 'base' })),
           surveillanceQualifications: versionMatch ? parseJson(survQualsRaw, DEFAULT_SURVEILLANCE_QUALIFICATIONS, onCorrupt('surveillance qualifications')) : DEFAULT_SURVEILLANCE_QUALIFICATIONS,
@@ -172,6 +185,7 @@ export function RosterProvider({ children }: { children: React.ReactNode }) {
       saveData('roster_qualifications',      JSON.stringify(s.qualifications)),
       saveData('roster_operators',           JSON.stringify(s.operators)),
       saveData('roster_operatorColors',      JSON.stringify(s.operatorColors)),
+      saveData('roster_otherDutiesColors',   JSON.stringify(s.otherDutiesColors)),
       saveData('roster_simulatorActivities', JSON.stringify(s.simulatorActivities)),
       saveData('roster_simulatorMap',        JSON.stringify(s.simulatorMap)),
       saveData('roster_surveillanceActivities',     JSON.stringify(s.surveillanceActivities)),
@@ -211,7 +225,7 @@ export function RosterProvider({ children }: { children: React.ReactNode }) {
         saveTimer.current = null;
       }
     };
-  }, [state.stagingQueue, state.calendarEvents, state.inspectors, state.qualifications, state.operators, state.operatorColors, state.simulatorActivities, state.simulatorMap, state.surveillanceActivities, state.surveillanceQualifications, state.leaveTypes, state.dutySubTypes, persistNow]);
+  }, [state.stagingQueue, state.calendarEvents, state.inspectors, state.qualifications, state.operators, state.operatorColors, state.otherDutiesColors, state.simulatorActivities, state.simulatorMap, state.surveillanceActivities, state.surveillanceQualifications, state.leaveTypes, state.dutySubTypes, persistNow]);
 
   // Flush any pending save when the window is closed/hidden so data isn't lost
   // inside the debounce window.
@@ -274,6 +288,11 @@ export function RosterProvider({ children }: { children: React.ReactNode }) {
   const commitEvent         = (id: string) => dispatch({ type: 'COMMIT_EVENT',           payload: id });
   const commitAll           = ()           => dispatch({ type: 'COMMIT_ALL' });
   const removeCalendarEvent = (id: string) => dispatch({ type: 'REMOVE_CALENDAR_EVENT',  payload: id });
+  const clearEventHistory = (
+    id: string,
+    kind: import('./rosterStore').EventHistoryField | 'inspectors' | 'time',
+  ) =>
+    dispatch({ type: 'CLEAR_EVENT_HISTORY', payload: { id, kind } });
 
   // ── Inspector actions ──────────────────────────────────────────────────────
   const addInspector = (data: Omit<Inspector, 'id'>) => {
@@ -303,6 +322,8 @@ export function RosterProvider({ children }: { children: React.ReactNode }) {
   // ── Operator color actions ─────────────────────────────────────────────────
   const setOperatorColor = (operator: string, color: string) =>
     dispatch({ type: 'SET_OPERATOR_COLOR', payload: { operator, color } });
+  const setOtherDutiesColor = (subType: string, color: string) =>
+    dispatch({ type: 'SET_OTHER_DUTIES_COLOR', payload: { subType, color } });
 
   // ── Simulator map actions ──────────────────────────────────────────────────
   const setSimMapEntry = (code: string, aircraftType: string) =>
@@ -348,6 +369,7 @@ export function RosterProvider({ children }: { children: React.ReactNode }) {
       commitEvent,
       commitAll,
       removeCalendarEvent,
+      clearEventHistory,
       addInspector,
       removeInspector,
       toggleQualification,
@@ -357,6 +379,7 @@ export function RosterProvider({ children }: { children: React.ReactNode }) {
       removeListItem,
       renameListItem,
       setOperatorColor,
+      setOtherDutiesColor,
       setSimMapEntry,
       removeSimMapEntry,
       setEditingEventId,

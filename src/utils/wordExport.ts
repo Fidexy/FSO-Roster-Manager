@@ -14,7 +14,15 @@ import {
   VerticalAlign,
   WidthType,
 } from "docx";
-import { RosterEvent } from "@/store/rosterStore";
+import {
+  RosterEvent,
+  EventHistoryField,
+  EventHistoryValue,
+  EVENT_HISTORY_FIELDS,
+  EVENT_HISTORY_LABELS,
+  getEventPreviousValue,
+  hasEventFieldHistory,
+} from "@/store/rosterStore";
 import { getHKHolidays } from "@/utils/holidays";
 
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -54,12 +62,13 @@ const FONT_SIZE = 16; // 8 pt (half-points)
  * in grey, or null when the event has no inspector change recorded.
  */
 function prevInspectorParagraph(event: RosterEvent): Paragraph | null {
-  if (!event.previousInspectors || event.previousInspectors.length === 0)
-    return null;
+  if (!hasEventFieldHistory(event, "inspectors")) return null;
+  const previous = getEventPreviousValue(event, "inspectors").value;
+  const names = Array.isArray(previous) ? fmtInspectors(previous) : "NONE";
   return new Paragraph({
     children: [
       new TextRun({
-        text: fmtInspectors(event.previousInspectors),
+        text: names || "NONE",
         font: FONT,
         size: FONT_SIZE,
         strike: true,
@@ -69,30 +78,134 @@ function prevInspectorParagraph(event: RosterEvent): Paragraph | null {
   });
 }
 
+function wordHistoryValue(
+  field: EventHistoryField,
+  value: EventHistoryValue,
+): string {
+  if (value === null) return "Not set";
+  if (Array.isArray(value)) return value.join(", ") || "None";
+  if (field === "date") {
+    const [year, month, day] = value.split("-");
+    return year && month && day ? `${day}-${month}-${year}` : value;
+  }
+  if (field === "startTime" || field === "endTime") return fmtTime(value);
+  return value;
+}
+
+/** Previous values for fields other than the dedicated time/inspector lines. */
+function previousFieldParagraphs(event: RosterEvent): Paragraph[] {
+  return EVENT_HISTORY_FIELDS.filter(
+    (field) =>
+      field !== "inspectors" && field !== "startTime" && field !== "endTime",
+  )
+    .filter((field) => hasEventFieldHistory(event, field))
+    .map((field) => {
+      const previous = getEventPreviousValue(event, field).value;
+      return new Paragraph({
+        children: [
+          new TextRun({
+            text: `${EVENT_HISTORY_LABELS[field]}: ${wordHistoryValue(field, previous)}`,
+            font: FONT,
+            size: FONT_SIZE,
+            strike: true,
+            color: "888888",
+          }),
+        ],
+      });
+    });
+}
+
+/**
+ * Returns a paragraph of the immediately previous event time rendered with
+ * strikethrough in grey, or null when no time change is recorded.
+ */
+function prevTimeParagraph(event: RosterEvent): Paragraph | null {
+  const previousStart = getEventPreviousValue(event, "startTime");
+  const previousEnd = getEventPreviousValue(event, "endTime");
+  if (
+    !previousStart.hasPrevious ||
+    !previousEnd.hasPrevious ||
+    !hasEventFieldHistory(event, "startTime") &&
+      !hasEventFieldHistory(event, "endTime")
+  ) return null;
+  const currentIsAllDay =
+    fmtTime(event.startTime) === "0000" &&
+    fmtTime(event.endTime) === "2359";
+  if (
+    currentIsAllDay &&
+    (event.eventType === "Other Duties" ||
+      event.eventType === "Surveillance" ||
+      event.eventType === "Leave")
+  ) {
+    return null;
+  }
+  return new Paragraph({
+    children: [
+      new TextRun({
+        text: timeSuffix(
+          String(previousStart.value ?? ""),
+          String(previousEnd.value ?? ""),
+        ).trim(),
+        font: FONT,
+        size: FONT_SIZE,
+        strike: true,
+        color: "888888",
+      }),
+    ],
+  });
+}
+
+function previousTimeFieldParagraphs(event: RosterEvent): Paragraph[] {
+  const previousStart = getEventPreviousValue(event, "startTime");
+  const previousEnd = getEventPreviousValue(event, "endTime");
+  if (previousStart.hasPrevious && previousEnd.hasPrevious) return [];
+  return (["startTime", "endTime"] as const)
+    .filter((field) => hasEventFieldHistory(event, field))
+    .map((field) => {
+      const previous = getEventPreviousValue(event, field).value;
+      return new Paragraph({
+        children: [
+          new TextRun({
+            text: `${EVENT_HISTORY_LABELS[field]}: ${wordHistoryValue(field, previous)}`,
+            font: FONT,
+            size: FONT_SIZE,
+            strike: true,
+            color: "888888",
+          }),
+        ],
+      });
+    });
+}
+
 /** Build the paragraphs for one event, per the corporate format. */
 function eventParagraphs(
   event: RosterEvent,
   operatorColors: Record<string, string>,
+  otherDutiesColors: Record<string, string>,
 ): Paragraph[] {
   const inspectors = fmtInspectors(event.inspectors);
   // Operator color — for Other Duties use first operator in array; others use single operator field
   const _primaryOp =
     event.eventType === "Other Duties"
-      ? (event.operators?.[0] ?? "")
+      ? (event.operators ?? []).find((operator) => operatorColors[operator]) ?? ""
       : event.eventType !== "Leave"
         ? event.operator
         : "";
   const opHex =
-    event.eventType === "Other Duties" &&
-    event.customColor &&
-    /^#[0-9a-f]{6}$/i.test(event.customColor)
-      ? docxColor(event.customColor)
-      : _primaryOp && operatorColors[_primaryOp]
-        ? docxColor(operatorColors[_primaryOp])
-        : undefined;
+    _primaryOp && operatorColors[_primaryOp]
+      ? docxColor(operatorColors[_primaryOp])
+      : event.eventType === "Other Duties" &&
+          event.customColor &&
+          /^#[0-9a-f]{6}$/i.test(event.customColor)
+        ? docxColor(event.customColor)
+        : event.eventType === "Other Duties" &&
+            otherDutiesColors[event.subType]
+          ? docxColor(otherDutiesColors[event.subType])
+          : undefined;
 
-  if (event.eventType === "Simulator") {
-    const line1 = `${event.operator} ${event.simulatorCode} ${event.aircraftType} ${(event.candidateName ?? "").toUpperCase()}${timeSuffix(event.startTime, event.endTime)}`;
+  if (event.eventType === "Operator Request") {
+    const codes = event.simulatorCodes?.join(", ") ?? event.simulatorCode;
+    const line1 = `${event.operator} ${codes} ${event.aircraftType} ${(event.candidateName ?? "").toUpperCase()}${timeSuffix(event.startTime, event.endTime)}`;
     const paras: Paragraph[] = [
       new Paragraph({
         children: [
@@ -122,8 +235,12 @@ function eventParagraphs(
         ],
       }),
     ];
+    const prevTime = prevTimeParagraph(event);
+    if (prevTime) paras.push(prevTime);
+    paras.push(...previousTimeFieldParagraphs(event));
     const prev = prevInspectorParagraph(event);
     if (prev) paras.push(prev);
+    paras.push(...previousFieldParagraphs(event));
     return paras;
   }
 
@@ -168,8 +285,12 @@ function eventParagraphs(
         }),
       );
     }
+    const prevTime = prevTimeParagraph(event);
+    if (prevTime) paras.push(prevTime);
+    paras.push(...previousTimeFieldParagraphs(event));
     const prev = prevInspectorParagraph(event);
     if (prev) paras.push(prev);
+    paras.push(...previousFieldParagraphs(event));
     return paras;
   }
 
@@ -204,8 +325,12 @@ function eventParagraphs(
         ],
       }),
     ];
+    const prevTime = prevTimeParagraph(event);
+    if (prevTime) paras.push(prevTime);
+    paras.push(...previousTimeFieldParagraphs(event));
     const prev = prevInspectorParagraph(event);
     if (prev) paras.push(prev);
+    paras.push(...previousFieldParagraphs(event));
     return paras;
   }
 
@@ -234,8 +359,12 @@ function eventParagraphs(
       ],
     }),
   ];
+  const prevTime = prevTimeParagraph(event);
+  if (prevTime) paras.push(prevTime);
+  paras.push(...previousTimeFieldParagraphs(event));
   const prev = prevInspectorParagraph(event);
   if (prev) paras.push(prev);
+  paras.push(...previousFieldParagraphs(event));
   return paras;
 }
 
@@ -245,7 +374,8 @@ function buildCalendarRows(
   month: number,
   byDate: Map<string, RosterEvent[]>,
   operatorColors: Record<string, string>,
-  markEmptyWednesdays = false,
+  otherDutiesColors: Record<string, string>,
+  markEmptyMondays = false,
 ): TableRow[] {
   const monthStr = `${year}-${String(month).padStart(2, "0")}`;
   const daysInMonth = new Date(year, month, 0).getDate();
@@ -334,7 +464,7 @@ function buildCalendarRows(
               ],
             }),
           ];
-          if (dayEvents.length === 0 && markEmptyWednesdays && colIdx === 3) {
+          if (dayEvents.length === 0 && markEmptyMondays && colIdx === 1) {
             paragraphs.push(
               new Paragraph({
                 children: [
@@ -351,7 +481,7 @@ function buildCalendarRows(
           }
           dayEvents.forEach((e, i) => {
             if (i > 0) paragraphs.push(new Paragraph({}));
-            paragraphs.push(...eventParagraphs(e, operatorColors));
+            paragraphs.push(...eventParagraphs(e, operatorColors, otherDutiesColors));
           });
           return new TableCell({
             width: colWidth(colIdx),
@@ -374,7 +504,7 @@ const NO_BORDER = { style: BorderStyle.NONE, size: 0, color: "FFFFFF" } as const
 const NO_BORDERS = { top: NO_BORDER, bottom: NO_BORDER, left: NO_BORDER, right: NO_BORDER };
 
 /**
- * Builds the inspector email list + Wednesday note to append below the calendar
+ * Builds the inspector email list + Monday note to append below the calendar
  * table in every Word export. Returns an array of Paragraph / Table nodes.
  */
 function buildInspectorEmailSection(inspectors: InspectorInfo[]): (Paragraph | Table)[] {
@@ -424,7 +554,7 @@ function buildInspectorEmailSection(inspectors: InspectorInfo[]): (Paragraph | T
     nodes.push(new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: tableRows }));
   }
 
-  // Wednesday note in red
+  // Monday note in red
   nodes.push(
     new Paragraph({
       spacing: { before: 120, after: 0 },
@@ -436,7 +566,7 @@ function buildInspectorEmailSection(inspectors: InspectorInfo[]): (Paragraph | T
           color: "FF0000",
         }),
         new TextRun({
-          text: "Wednesday",
+          text: "Monday",
           font: FONT,
           size: 16,
           color: "FF0000",
@@ -470,10 +600,10 @@ export async function exportWordOperatorPlan(
 ): Promise<Blob> {
   const monthStr = `${year}-${String(month).padStart(2, "0")}`;
 
-  // Only Simulator events for this operator, grouped by date, sorted by start time
+  // Only Operator Request events for this operator, grouped by date, sorted by start time
   const byDate = new Map<string, RosterEvent[]>();
   for (const e of events) {
-    if (e.eventType !== "Simulator" || e.operator !== operator) continue;
+    if (e.eventType !== "Operator Request" || e.operator !== operator) continue;
     if (!e.date.startsWith(`${monthStr}-`)) continue;
     const list = byDate.get(e.date) ?? [];
     list.push(e);
@@ -483,7 +613,7 @@ export async function exportWordOperatorPlan(
     list.sort((a, b) => a.startTime.localeCompare(b.startTime));
   }
 
-  const rows = buildCalendarRows(year, month, byDate, operatorColors, true);
+  const rows = buildCalendarRows(year, month, byDate, operatorColors, {}, true);
 
   const MARGIN = 360;
   const doc = new Document({
@@ -541,14 +671,15 @@ export async function exportWordCalendar(
   events: RosterEvent[],
   operatorColors: Record<string, string>,
   version?: number,
+  otherDutiesColors: Record<string, string> = {},
 ) {
   const monthStr = `${year}-${String(month).padStart(2, "0")}`;
   const vSuffix = version && version > 0 ? `-v${version}` : "";
 
-  // Simulator, Surveillance, Other Duties, Flying, then Leave; start time
+  // Operator Request, Surveillance, Other Duties, Flying, then Leave; start time
   // breaks ties while preserving the existing Flying > Leave priority.
   const sortTier = (e: RosterEvent) =>
-    e.eventType === "Simulator"
+    e.eventType === "Operator Request"
       ? 0
       : e.eventType === "Surveillance"
         ? 1
@@ -573,7 +704,7 @@ export async function exportWordCalendar(
     );
   }
 
-  const rows = buildCalendarRows(year, month, byDate, operatorColors);
+  const rows = buildCalendarRows(year, month, byDate, operatorColors, otherDutiesColors);
 
   // Portrait, narrow margins (360 twips ≈ 0.25 in) to fit on one page
   const MARGIN = 360;

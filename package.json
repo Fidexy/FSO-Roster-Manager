@@ -1,6 +1,6 @@
 {
   "name": "roster-manager",
-  "version": "0.3.1",
+  "version": "0.3.3",
   "private": true,
   "type": "module",
   "main": "main.cjs",
@@ -9,6 +9,7 @@
     "dev": "vite --config vite.config.ts --host 0.0.0.0",
     "build": "vite build --config vite.config.ts",
     "serve": "vite preview --config vite.config.ts",
+    "test": "vitest run",
     "pre-dist": "pnpm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dist": "electron-builder --win nsis",
@@ -104,6 +105,7 @@
     "typescript": "^5.0.0",
     "vaul": "^1.1.2",
     "vite": "^7.3.2",
+    "vitest": "^4.1.11",
     "wouter": "^3.3.5",
     "zod": "^3.25.76",
     "date-holidays": "^3.34.1",

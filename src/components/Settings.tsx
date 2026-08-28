@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { Plus, Trash2, UserPlus, X, ChevronDown, Copy, Check, Pencil } from 'lucide-react';
-import { useRosterStore, SIMULATOR_ACTIVITIES, firstNameOf, makeShortName } from '@/store/rosterStore';
+import { useRosterStore, SIMULATOR_ACTIVITIES, firstNameOf, makeShortName, sortInspectorsByName } from '@/store/rosterStore';
 
 // ─── Pill tag + autocomplete input ───────────────────────────────────────────
 
@@ -380,6 +380,8 @@ function RenameListEditor({
   onAdd,
   onRemove,
   onRename,
+  itemColors,
+  onColorChange,
   placeholder,
 }: {
   title: string;
@@ -388,6 +390,8 @@ function RenameListEditor({
   onAdd: (v: string) => void;
   onRemove: (v: string) => void;
   onRename: (oldValue: string, newValue: string) => void;
+  itemColors?: Record<string, string>;
+  onColorChange?: (item: string, color: string) => void;
   placeholder?: string;
 }) {
   const [draft, setDraft] = useState('');
@@ -431,6 +435,20 @@ function RenameListEditor({
                 key={item}
                 className={`group flex items-center gap-2 px-3 py-2 ${i < items.length - 1 ? 'border-b border-border' : ''}`}
               >
+                {itemColors && onColorChange && (
+                  <label
+                    className="relative w-6 h-6 rounded cursor-pointer shrink-0 border border-black/10 shadow-sm overflow-hidden"
+                    title={`Pick colour for ${item}`}
+                    style={{ backgroundColor: itemColors[item] ?? '#9333ea' }}
+                  >
+                    <input
+                      type="color"
+                      value={itemColors[item] ?? '#9333ea'}
+                      onChange={e => onColorChange(item, e.target.value)}
+                      className="absolute inset-0 opacity-0 w-full h-full cursor-pointer"
+                    />
+                  </label>
+                )}
                 {renamingItem === item ? (
                   <input
                     ref={renameRef}
@@ -559,7 +577,7 @@ function ActivityQualEditor({
           No activities yet.
         </div>
       ) : (
-        <div className="bg-card border border-border rounded overflow-hidden">
+        <div className="bg-card border border-border rounded overflow-visible">
           {activities.map((activity, i) => {
             const permitted = qualifications[activity] ?? [];
             return (
@@ -749,12 +767,12 @@ function SimMapEditor({
 
 // ─── JSON reference collapsible ──────────────────────────────────────────────
 
-type RefTab = 'Roster Backup' | 'Settings Backup' | 'Simulator' | 'Surveillance' | 'Other Duties' | 'Leave';
+type RefTab = 'Roster Backup' | 'Settings Backup' | 'Operator Request' | 'Surveillance' | 'Other Duties' | 'Leave';
 
 const REF_FILENAMES: Record<RefTab, string> = {
   'Roster Backup':   'roster-backup.json',
   'Settings Backup': 'settings-backup.json',
-  'Simulator':       'simulator-event.json',
+  'Operator Request': 'operator-request-event.json',
   'Surveillance':    'surveillance-event.json',
   'Other Duties':    'other-duties-event.json',
   'Leave':           'leave-event.json',
@@ -780,12 +798,12 @@ const REF_EXAMPLES: Record<RefTab, object> = {
     calendarEvents: [
       {
         id: 'evt_abc123',
-        eventType: 'Simulator',
+        eventType: 'Operator Request',
         date: '2026-08-11',
         startTime: '09:00',
         endTime: '13:00',
         operator: 'CPA',
-        simulatorCode: 'CPA01',
+        simulatorCodes: ['CPA01'],
         aircraftType: 'B777-300ER',
         activity: 'AE Initial',
         candidateName: 'Chan, Peter',
@@ -831,14 +849,14 @@ const REF_EXAMPLES: Record<RefTab, object> = {
       'QMS Audit': ['ASI(1)'],
     },
   },
-  Simulator: {
+  'Operator Request': {
     id: 'evt_abc123',
-    eventType: 'Simulator',
+     eventType: 'Operator Request',
     date: '2026-08-11',
     startTime: '09:00',
     endTime: '13:00',
     operator: 'CPA',
-    simulatorCode: 'CPA01',
+    simulatorCodes: ['CPA01'],
     aircraftType: 'B777-300ER',
     activity: 'AE Initial',
     candidateName: 'Chan, Peter',
@@ -877,7 +895,7 @@ const REF_EXAMPLES: Record<RefTab, object> = {
   },
 };
 
-const TABS: RefTab[] = ['Roster Backup', 'Settings Backup', 'Simulator', 'Surveillance', 'Other Duties', 'Leave'];
+const TABS: RefTab[] = ['Roster Backup', 'Settings Backup', 'Operator Request', 'Surveillance', 'Other Duties', 'Leave'];
 
 function EventJsonReferenceCollapsible() {
   const [open,   setOpen]   = useState(false);
@@ -962,14 +980,15 @@ function EventJsonReferenceCollapsible() {
 // ─── Main settings page ───────────────────────────────────────────────────────
 
 export default function Settings() {
-  const { state, addInspector, removeInspector, setActivityQualifications, setSurveillanceQualifications, addListItem, removeListItem, renameListItem, setSimMapEntry, removeSimMapEntry, setOperatorColor } = useRosterStore();
-  const { inspectors, qualifications, operators, operatorColors, simulatorActivities, surveillanceActivities, surveillanceQualifications, simulatorMap, leaveTypes, dutySubTypes } = state;
+  const { state, addInspector, removeInspector, setActivityQualifications, setSurveillanceQualifications, addListItem, removeListItem, renameListItem, setSimMapEntry, removeSimMapEntry, setOperatorColor, setOtherDutiesColor } = useRosterStore();
+  const { inspectors, qualifications, operators, operatorColors, otherDutiesColors, simulatorActivities, surveillanceActivities, surveillanceQualifications, simulatorMap, leaveTypes, dutySubTypes } = state;
+  const orderedInspectors = sortInspectorsByName(inspectors);
 
   const [newName,     setNewName]     = useState('');
   const [newPosition, setNewPosition] = useState('');
   const [newEmail,    setNewEmail]    = useState('');
 
-  const uniquePositions = [...new Set(inspectors.map(i => i.position))].sort();
+  const uniquePositions = [...new Set(orderedInspectors.map(i => i.position))].sort();
 
   const handleAddInspector = (e: React.FormEvent) => {
     e.preventDefault();
@@ -1008,11 +1027,11 @@ export default function Settings() {
                     </tr>
                   </thead>
                   <tbody>
-                    {inspectors.map((inspector, i) => (
+                    {orderedInspectors.map((inspector, i) => (
                       <tr key={inspector.id} className={`group ${i < inspectors.length - 1 ? 'border-b border-border' : ''}`}>
                         <td className="px-4 py-2.5 text-foreground font-medium">
                           {inspector.name}
-                          <span className="ml-1.5 text-muted-foreground font-normal text-[11px]">({makeShortName(inspectors)(inspector.name)})</span>
+                          <span className="ml-1.5 text-muted-foreground font-normal text-[11px]">({makeShortName(orderedInspectors)(inspector.name)})</span>
                         </td>
                         <td className="px-4 py-2.5 text-muted-foreground">{inspector.position}</td>
                         <td className="px-4 py-2.5 text-muted-foreground text-xs">{inspector.email ?? '—'}</td>
@@ -1065,7 +1084,7 @@ export default function Settings() {
               activities={simulatorActivities}
               qualifications={qualifications}
               uniquePositions={uniquePositions}
-              inspectors={inspectors}
+              inspectors={orderedInspectors}
               onAdd={v         => addListItem('simulatorActivities', v)}
               onRemove={v      => removeListItem('simulatorActivities', v)}
               onRename={(o, n) => renameListItem('simulatorActivities', o, n)}
@@ -1078,7 +1097,7 @@ export default function Settings() {
               activities={surveillanceActivities}
               qualifications={surveillanceQualifications}
               uniquePositions={uniquePositions}
-              inspectors={inspectors}
+              inspectors={orderedInspectors}
               onAdd={v         => addListItem('surveillanceActivities', v)}
               onRemove={v      => removeListItem('surveillanceActivities', v)}
               onRename={(o, n) => renameListItem('surveillanceActivities', o, n)}
@@ -1108,12 +1127,13 @@ export default function Settings() {
           />
           <RenameListEditor
             title="Other Duties Sub-Types"
-            description="Types shown in the Other Duties type dropdown."
+            description="Types shown in the Other Duties type dropdown. Set a default colour for each subtype."
             items={dutySubTypes}
             onAdd={v         => addListItem('dutySubTypes', v)}
             onRemove={v      => removeListItem('dutySubTypes', v)}
             onRename={(o, n) => renameListItem('dutySubTypes', o, n)}
-
+            itemColors={otherDutiesColors}
+            onColorChange={(subType, color) => setOtherDutiesColor(subType, color)}
           />
         </div>
 

@@ -1,6 +1,6 @@
 /**
  * Computes a human-readable changelog between two sets of RosterEvents.
- * Only Simulator and Surveillance events are tracked.
+ * Operator Request, Surveillance, and Other Duties events are tracked.
  * Matching is ID-based (events keep their IDs when edited via the app).
  */
 
@@ -18,6 +18,8 @@ export interface ChangelogEntry {
 export interface ChangelogHistoryVersion {
   version: number;
   entries: ChangelogEntry[];
+  /** Immutable month state at this committed version, when available. */
+  snapshot?: RosterEvent[];
 }
 
 function escHtml(value: string): string {
@@ -38,15 +40,52 @@ function formatDate(dateStr: string): string {
   return `${day} ${months[mon] ?? ''}`;
 }
 
+function safeString(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function displayValue(value: unknown): string {
+  return safeString(value) || '\u2014';
+}
+
+/**
+ * Other Duties used to store one operator in `operator`; current records use
+ * `operators`. Read both shapes so old committed snapshots compare cleanly
+ * with current events.
+ */
+function otherDutiesOperators(e: RosterEvent): string[] {
+  const record = e as Record<string, unknown>;
+  if (Array.isArray(record.operators)) {
+    return record.operators.filter((operator): operator is string =>
+      typeof operator === 'string',
+    );
+  }
+  return typeof record.operator === 'string' ? [record.operator] : [];
+}
+
+function otherDutiesSubType(e: RosterEvent): string {
+  return safeString((e as Record<string, unknown>).subType);
+}
+
+function otherDutiesRemarks(e: RosterEvent): string {
+  return safeString((e as Record<string, unknown>).remarks);
+}
+
 /** Bold event identifier line — date first, no inspectors. */
 function eventLabel(e: RosterEvent): string {
   const d = formatDate(e.date);
-  if (e.eventType === 'Simulator') {
-    return `${d} \u2014 ${e.operator} ${e.simulatorCode}`;
+  if (e.eventType === 'Operator Request') {
+    return `${d} \u2014 ${e.operator} ${e.simulatorCodes?.join(', ') ?? e.simulatorCode}`;
   }
   if (e.eventType === 'Surveillance') {
     const types = e.surveillanceTypes.join('/');
     return `${d} \u2014 ${e.operator} ${types}${e.details ? ' ' + e.details : ''}`;
+  }
+  if (e.eventType === 'Other Duties') {
+    const operators = otherDutiesOperators(e).join(', ');
+    const subType = otherDutiesSubType(e);
+    const identifier = [operators, subType].filter(Boolean).join(' ');
+    return `${d} \u2014 ${identifier || 'Other Duties'}`;
   }
   return d;
 }
@@ -54,10 +93,14 @@ function eventLabel(e: RosterEvent): string {
 /** Stable fingerprint for detecting changes in key fields. */
 function fingerprint(e: RosterEvent): string {
   const base = `${e.date}|${e.startTime}|${e.endTime}|${[...e.inspectors].sort().join(',')}`;
-  if (e.eventType === 'Simulator')
-    return `${base}|${e.operator}|${e.simulatorCode}|${e.activity}|${e.candidateName ?? ''}`;
+  if (e.eventType === 'Operator Request')
+    return `${base}|${e.operator}|${e.simulatorCodes?.join(',') ?? e.simulatorCode}|${e.activity}|${e.candidateName ?? ''}`;
   if (e.eventType === 'Surveillance')
     return `${base}|${e.operator}|${[...e.surveillanceTypes].sort().join(',')}|${e.details ?? ''}`;
+  if (e.eventType === 'Other Duties') {
+    const operators = otherDutiesOperators(e).slice().sort().join(',');
+    return `${base}|${operators}|${otherDutiesSubType(e)}|${otherDutiesRemarks(e)}`;
+  }
   return base;
 }
 
@@ -84,11 +127,13 @@ function diffFields(base: RosterEvent, curr: RosterEvent): string[] {
     out.push(`Time: ${base.startTime}\u2013${base.endTime} \u2192 ${curr.startTime}\u2013${curr.endTime}`);
 
   // Type-specific fields
-  if (curr.eventType === 'Simulator' && base.eventType === 'Simulator') {
+  if (curr.eventType === 'Operator Request' && base.eventType === 'Operator Request') {
     if (base.operator      !== curr.operator)
       out.push(`Operator: ${base.operator} \u2192 ${curr.operator}`);
-    if (base.simulatorCode !== curr.simulatorCode)
-      out.push(`Sim code: ${base.simulatorCode} \u2192 ${curr.simulatorCode}`);
+    const baseCodes = base.simulatorCodes?.join(', ') ?? base.simulatorCode;
+    const currCodes = curr.simulatorCodes?.join(', ') ?? curr.simulatorCode;
+    if (baseCodes !== currCodes)
+      out.push(`Sim code: ${baseCodes || '\u2014'} \u2192 ${currCodes || '\u2014'}`);
     if (base.activity      !== curr.activity)
       out.push(`Activity: ${base.activity} \u2192 ${curr.activity}`);
     if ((base.candidateName ?? '') !== (curr.candidateName ?? ''))
@@ -102,6 +147,22 @@ function diffFields(base: RosterEvent, curr: RosterEvent): string[] {
       out.push(`Type: ${base.surveillanceTypes.join(', ') || '\u2014'} \u2192 ${curr.surveillanceTypes.join(', ') || '\u2014'}`);
     if ((base.details ?? '') !== (curr.details ?? ''))
       out.push(`Details: ${base.details || '\u2014'} \u2192 ${curr.details || '\u2014'}`);
+  } else if (curr.eventType === 'Other Duties' && base.eventType === 'Other Duties') {
+    const baseOperators = otherDutiesOperators(base);
+    const currOperators = otherDutiesOperators(curr);
+    if (baseOperators.slice().sort().join(',') !== currOperators.slice().sort().join(',')) {
+      out.push(
+        `Operator${baseOperators.length === 1 && currOperators.length === 1 ? '' : 's'}: ${displayValue(baseOperators.join(', '))} \u2192 ${displayValue(currOperators.join(', '))}`,
+      );
+    }
+    const baseSubType = otherDutiesSubType(base);
+    const currSubType = otherDutiesSubType(curr);
+    if (baseSubType !== currSubType)
+      out.push(`Sub-type: ${displayValue(baseSubType)} \u2192 ${displayValue(currSubType)}`);
+    const baseRemarks = otherDutiesRemarks(base);
+    const currRemarks = otherDutiesRemarks(curr);
+    if (baseRemarks !== currRemarks)
+      out.push(`Remarks: ${displayValue(baseRemarks)} \u2192 ${displayValue(currRemarks)}`);
   }
 
   return out;
@@ -123,11 +184,14 @@ function diffFieldsHtml(base: RosterEvent, curr: RosterEvent, details: string[])
 }
 
 /**
- * Returns true when tracked (Simulator / Surveillance) events differ between
+ * Returns true when tracked (Operator Request / Surveillance / Other Duties) events differ between
  * baseline and current — used to detect uncommitted changes before export.
  */
 export function hasTrackedChanges(baseline: RosterEvent[], current: RosterEvent[]): boolean {
-  const isTracked = (e: RosterEvent) => e.eventType === 'Simulator' || e.eventType === 'Surveillance';
+  const isTracked = (e: RosterEvent) =>
+    e.eventType === 'Operator Request' ||
+    e.eventType === 'Surveillance' ||
+    e.eventType === 'Other Duties';
   const baseMap = new Map(baseline.filter(isTracked).map(e => [e.id, fingerprint(e)]));
   const currMap = new Map(current.filter(isTracked).map(e =>  [e.id, fingerprint(e)]));
   if (baseMap.size !== currMap.size) return true;
@@ -139,15 +203,17 @@ export function hasTrackedChanges(baseline: RosterEvent[], current: RosterEvent[
 
 /**
  * Returns a sorted list of added / removed / changed events between a version
- * snapshot and the current event state. Only Simulator and Surveillance events
- * are included; Other Duties and Leave are silently ignored.
+ * snapshot and the current event state. Operator Request, Surveillance, and
+ * Other Duties events are included; Leave events are silently ignored.
  */
 export function computeChangelog(
   baseline: RosterEvent[],
   current:  RosterEvent[],
 ): ChangelogEntry[] {
   const isTracked = (e: RosterEvent) =>
-    e.eventType === 'Simulator' || e.eventType === 'Surveillance';
+    e.eventType === 'Operator Request' ||
+    e.eventType === 'Surveillance' ||
+    e.eventType === 'Other Duties';
 
   const baseMap = new Map(baseline.filter(isTracked).map(e => [e.id, e]));
   const currMap = new Map(current.filter(isTracked).map(e =>  [e.id, e]));
